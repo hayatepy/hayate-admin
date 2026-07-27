@@ -8,10 +8,9 @@ Secure operational administration for Hayate, using explicit resources and
 checked SQL rather than ORM or database reflection.
 
 > **Status: pre-release.** The typed CRUD and security core is implemented.
-> The SQLite/generated-SQL and browser reference path is implemented. The
-> package must not be described as Django admin parity until the Workers/D1
-> evidence in
-> [#3](https://github.com/hayatepy/hayate-admin/issues/3) is complete.
+> The SQLite/generated-SQL, browser, and native Workers/D1 reference paths are
+> implemented. General Django admin parity is not claimed: bulk actions,
+> relationships/inlines, and object history remain explicit Phase 2 gaps.
 
 `hayate-admin` is an internal management tool for trusted operators. Public,
 process-centric customer workflows should remain purpose-built application
@@ -166,6 +165,11 @@ sessions, separately provisioned viewer/editor/operator roles, generated
 hayate-sql list/count/get/create/update/delete functions, persistent redacted
 audit rows, and a Chromium CRUD/search/filter/sort gate. It is the complete
 minimal integration for the initial package contract.
+
+The [Workers/D1 gate](examples/workers_d1/README.md) packages the exact same
+resource and generated query facade into workerd. It exercises the full
+authorization, mutation, CRUD, escaping, audit, page, and fragment contract
+without ASGI.
 
 ## Development
 

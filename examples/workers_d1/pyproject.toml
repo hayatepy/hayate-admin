@@ -1,0 +1,16 @@
+[project]
+name = "hayate-admin-workers-d1-example"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "hayate==0.13.0",
+  "hayate-admin==0.1.0",
+  "hayate-htmx==0.2.0",
+  "hayate-sql==0.1.1",
+]
+
+[dependency-groups]
+dev = [
+  "workers-py==1.15.0",
+  "workers-runtime-sdk==1.6.3",
+]

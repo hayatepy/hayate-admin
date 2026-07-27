@@ -46,6 +46,11 @@ Generated hayate-sql functions are the recommended boundary. Transactions,
 optimistic concurrency, referential integrity, and row-level authorization
 remain repository responsibilities.
 
+Cloudflare D1 and similar runtime bindings exist only on the request context.
+Use an `AdminRepositoryFactory` to resolve the repository from that context;
+never mutate a global repository to point at the current request. The factory
+is synchronous and must return a complete repository before an operation runs.
+
 ## Audit boundary
 
 `AuditEvent` intentionally contains no submitted values, record snapshots, SQL,
@@ -57,6 +62,10 @@ mutation. A success-event failure occurs after the repository returned and
 cannot generically roll back across all databases; repositories that require
 atomic data-and-audit commits should perform their own transactional audit and
 use the site sink as an external security signal.
+
+Use `audit_factory` when the durable sink depends on a request-local platform
+binding. Exactly one static `audit` or request-scoped `audit_factory` is
+required.
 
 ## Denial-of-service controls
 

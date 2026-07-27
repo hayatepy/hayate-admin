@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from math import isfinite
 from types import MappingProxyType
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 from hayate import Context
 
@@ -283,6 +283,17 @@ class AdminRepository(Protocol):
     async def delete(self, object_id: str) -> bool: ...
 
 
+class AdminRepositoryFactory(Protocol):
+    """Resolve a repository from request-local runtime bindings."""
+
+    def __call__(self, context: Context) -> AdminRepository: ...
+
+
+def _is_repository(value: object) -> bool:
+    operations = ("list", "get", "create", "update", "delete")
+    return all(callable(getattr(value, operation, None)) for operation in operations)
+
+
 @dataclass(frozen=True, slots=True)
 class AdminResource:
     """Explicit operational surface for one record family."""
@@ -291,7 +302,7 @@ class AdminResource:
     label: str
     singular_label: str
     fields: tuple[AdminField, ...]
-    repository: AdminRepository
+    repository: AdminRepository | AdminRepositoryFactory
     id_field: str = "id"
     title_field: str = "id"
     page_size: int = 50
@@ -323,9 +334,10 @@ class AdminResource:
             raise ValueError(f"{self.slug}: title_field must name a declared field")
         if not any(admin_field.list_display for admin_field in self.fields):
             raise ValueError(f"{self.slug}: at least one field must be shown in lists")
-        operations = ("list", "get", "create", "update", "delete")
-        if any(not callable(getattr(self.repository, operation, None)) for operation in operations):
-            raise ValueError(f"{self.slug}: repository must implement all admin operations")
+        if not _is_repository(self.repository) and not callable(self.repository):
+            raise ValueError(
+                f"{self.slug}: repository must implement all operations or be a factory"
+            )
         if (
             not isinstance(self.page_size, int)
             or isinstance(self.page_size, bool)
@@ -336,6 +348,15 @@ class AdminResource:
     @property
     def field_map(self) -> Mapping[str, AdminField]:
         return MappingProxyType({field.name: field for field in self.fields})
+
+    def repository_for(self, context: Context) -> AdminRepository:
+        """Resolve a static repository or one backed by request-local bindings."""
+        if _is_repository(self.repository):
+            return cast(AdminRepository, self.repository)
+        resolved = cast(AdminRepositoryFactory, self.repository)(context)
+        if not _is_repository(resolved):
+            raise TypeError(f"{self.slug}: repository factory returned an invalid repository")
+        return resolved
 
 
 @dataclass(frozen=True, slots=True)
@@ -367,6 +388,12 @@ class AuditSink(Protocol):
     """Persist or forward redacted security events."""
 
     def __call__(self, event: AuditEvent) -> Awaitable[None]: ...
+
+
+class AuditSinkFactory(Protocol):
+    """Resolve an audit sink from request-local runtime bindings."""
+
+    def __call__(self, context: Context) -> AuditSink: ...
 
 
 class AdminValidationError(ValueError):

@@ -28,6 +28,7 @@ from .contracts import (
     AuditEvent,
     AuditPhase,
     AuditSink,
+    AuditSinkFactory,
     Authorizer,
     ListQuery,
     Page,
@@ -70,6 +71,7 @@ class AdminSite:
 
     __slots__ = (
         "_audit",
+        "_audit_factory",
         "_authorize",
         "_registered",
         "_renderer",
@@ -85,7 +87,8 @@ class AdminSite:
         title: str,
         allowed_origins: set[str] | frozenset[str],
         authorize: Authorizer,
-        audit: AuditSink,
+        audit: AuditSink | None = None,
+        audit_factory: AuditSinkFactory | None = None,
         prefix: str = "/admin",
         htmx_asset: AdminAsset | None = None,
     ) -> None:
@@ -95,8 +98,12 @@ class AdminSite:
             raise ValueError("admin allowed_origins must not be empty")
         if not callable(authorize):
             raise ValueError("admin authorize must be callable")
-        if not callable(audit):
+        if (audit is None) == (audit_factory is None):
+            raise ValueError("admin requires exactly one audit sink or audit_factory")
+        if audit is not None and not callable(audit):
             raise ValueError("admin audit must be callable")
+        if audit_factory is not None and not callable(audit_factory):
+            raise ValueError("admin audit_factory must be callable")
         if htmx_asset is not None and not isinstance(htmx_asset, AdminAsset):
             raise ValueError("admin htmx_asset must be an AdminAsset")
         self.title = title
@@ -104,6 +111,7 @@ class AdminSite:
         self._trusted_origins = frozenset(_normalize_origin(origin) for origin in allowed_origins)
         self._authorize = authorize
         self._audit = audit
+        self._audit_factory = audit_factory
         self._resources: dict[str, AdminResource] = {}
         self._registered = False
         self._renderer = AdminRenderer(prefix=self.prefix, title=title, asset=htmx_asset)
@@ -221,7 +229,7 @@ class AdminSite:
             query = self._list_query(context, resource)
         except ValueError as error:
             return problem(400, title="Invalid admin list query", detail=str(error))
-        page = await resource.repository.list(query)
+        page = await resource.repository_for(context).list(query)
         self._validate_page(resource, query, page)
         content = self._renderer.listing(
             resource,
@@ -302,7 +310,7 @@ class AdminSite:
         actor = await self._allowed(context, "resource:view", resource, object_id)
         if actor is None:
             return self._forbidden()
-        record = await resource.repository.get(object_id)
+        record = await resource.repository_for(context).get(object_id)
         if record is None:
             return self._not_found()
         self._validate_record(resource, record)
@@ -352,17 +360,31 @@ class AdminSite:
             return guard
         actor = await self._allowed(context, "resource:add", resource)
         if actor is None:
-            await self._failure("resource:add", resource, None, None, "AuthorizationDenied")
+            await self._failure(
+                context,
+                "resource:add",
+                resource,
+                None,
+                None,
+                "AuthorizationDenied",
+            )
             return self._forbidden()
-        await self._event("attempt", "resource:add", resource, None, actor)
+        await self._event(context, "attempt", "resource:add", resource, None, actor)
 
         parsed = await self._parse_form(context, resource)
         if isinstance(parsed, Response):
-            await self._failure("resource:add", resource, None, actor, "InvalidForm")
+            await self._failure(context, "resource:add", resource, None, actor, "InvalidForm")
             return parsed
         values, display_values, errors = parsed
         if errors:
-            await self._failure("resource:add", resource, None, actor, "ValidationError")
+            await self._failure(
+                context,
+                "resource:add",
+                resource,
+                None,
+                actor,
+                "ValidationError",
+            )
             return self._form_error_response(
                 context,
                 resource,
@@ -374,9 +396,16 @@ class AdminSite:
                 submit_label="Create",
             )
         try:
-            record = await resource.repository.create(values)
+            record = await resource.repository_for(context).create(values)
         except AdminValidationError as error:
-            await self._failure("resource:add", resource, None, actor, type(error).__name__)
+            await self._failure(
+                context,
+                "resource:add",
+                resource,
+                None,
+                actor,
+                type(error).__name__,
+            )
             return self._form_error_response(
                 context,
                 resource,
@@ -388,11 +417,18 @@ class AdminSite:
                 submit_label="Create",
             )
         except Exception as error:
-            await self._failure("resource:add", resource, None, actor, type(error).__name__)
+            await self._failure(
+                context,
+                "resource:add",
+                resource,
+                None,
+                actor,
+                type(error).__name__,
+            )
             raise
         object_id = self._record_id(resource, record)
         self._validate_record(resource, record)
-        await self._event("success", "resource:add", resource, object_id, actor)
+        await self._event(context, "success", "resource:add", resource, object_id, actor)
         return self._redirect(context, self._record_location(resource, object_id))
 
     async def _edit_form(self, context: Context) -> Response:
@@ -403,7 +439,7 @@ class AdminSite:
         actor = await self._allowed(context, "resource:change", resource, object_id)
         if actor is None:
             return self._forbidden()
-        record = await resource.repository.get(object_id)
+        record = await resource.repository_for(context).get(object_id)
         if record is None:
             return self._not_found()
         self._validate_record(resource, record)
@@ -433,18 +469,39 @@ class AdminSite:
             return guard
         actor = await self._allowed(context, "resource:change", resource, object_id)
         if actor is None:
-            await self._failure("resource:change", resource, object_id, None, "AuthorizationDenied")
+            await self._failure(
+                context,
+                "resource:change",
+                resource,
+                object_id,
+                None,
+                "AuthorizationDenied",
+            )
             return self._forbidden()
-        await self._event("attempt", "resource:change", resource, object_id, actor)
+        await self._event(context, "attempt", "resource:change", resource, object_id, actor)
 
         parsed = await self._parse_form(context, resource)
         if isinstance(parsed, Response):
-            await self._failure("resource:change", resource, object_id, actor, "InvalidForm")
+            await self._failure(
+                context,
+                "resource:change",
+                resource,
+                object_id,
+                actor,
+                "InvalidForm",
+            )
             return parsed
         values, display_values, errors = parsed
         action = f"{self._record_location(resource, object_id)}/edit"
         if errors:
-            await self._failure("resource:change", resource, object_id, actor, "ValidationError")
+            await self._failure(
+                context,
+                "resource:change",
+                resource,
+                object_id,
+                actor,
+                "ValidationError",
+            )
             return self._form_error_response(
                 context,
                 resource,
@@ -456,9 +513,16 @@ class AdminSite:
                 submit_label="Save changes",
             )
         try:
-            record = await resource.repository.update(object_id, values)
+            record = await resource.repository_for(context).update(object_id, values)
         except AdminValidationError as error:
-            await self._failure("resource:change", resource, object_id, actor, type(error).__name__)
+            await self._failure(
+                context,
+                "resource:change",
+                resource,
+                object_id,
+                actor,
+                type(error).__name__,
+            )
             return self._form_error_response(
                 context,
                 resource,
@@ -470,13 +534,27 @@ class AdminSite:
                 submit_label="Save changes",
             )
         except Exception as error:
-            await self._failure("resource:change", resource, object_id, actor, type(error).__name__)
+            await self._failure(
+                context,
+                "resource:change",
+                resource,
+                object_id,
+                actor,
+                type(error).__name__,
+            )
             raise
         if record is None:
-            await self._failure("resource:change", resource, object_id, actor, "NotFound")
+            await self._failure(
+                context,
+                "resource:change",
+                resource,
+                object_id,
+                actor,
+                "NotFound",
+            )
             return self._not_found()
         self._validate_record(resource, record)
-        await self._event("success", "resource:change", resource, object_id, actor)
+        await self._event(context, "success", "resource:change", resource, object_id, actor)
         return self._redirect(context, self._record_location(resource, object_id))
 
     async def _delete_form(self, context: Context) -> Response:
@@ -487,7 +565,7 @@ class AdminSite:
         actor = await self._allowed(context, "resource:delete", resource, object_id)
         if actor is None:
             return self._forbidden()
-        record = await resource.repository.get(object_id)
+        record = await resource.repository_for(context).get(object_id)
         if record is None:
             return self._not_found()
         self._validate_record(resource, record)
@@ -510,18 +588,39 @@ class AdminSite:
             return guard
         actor = await self._allowed(context, "resource:delete", resource, object_id)
         if actor is None:
-            await self._failure("resource:delete", resource, object_id, None, "AuthorizationDenied")
+            await self._failure(
+                context,
+                "resource:delete",
+                resource,
+                object_id,
+                None,
+                "AuthorizationDenied",
+            )
             return self._forbidden()
-        await self._event("attempt", "resource:delete", resource, object_id, actor)
+        await self._event(context, "attempt", "resource:delete", resource, object_id, actor)
         try:
-            deleted = await resource.repository.delete(object_id)
+            deleted = await resource.repository_for(context).delete(object_id)
         except Exception as error:
-            await self._failure("resource:delete", resource, object_id, actor, type(error).__name__)
+            await self._failure(
+                context,
+                "resource:delete",
+                resource,
+                object_id,
+                actor,
+                type(error).__name__,
+            )
             raise
         if not deleted:
-            await self._failure("resource:delete", resource, object_id, actor, "NotFound")
+            await self._failure(
+                context,
+                "resource:delete",
+                resource,
+                object_id,
+                actor,
+                "NotFound",
+            )
             return self._not_found()
-        await self._event("success", "resource:delete", resource, object_id, actor)
+        await self._event(context, "success", "resource:delete", resource, object_id, actor)
         return self._redirect(context, f"{self.prefix}/{resource.slug}")
 
     async def _guard_mutation(
@@ -533,7 +632,14 @@ class AdminSite:
     ) -> Response | None:
         fetch_site = (context.req.header("sec-fetch-site") or "").lower()
         if fetch_site not in ("", "same-origin", "same-site", "none"):
-            await self._failure(action, resource, object_id, None, "CrossSiteRequest")
+            await self._failure(
+                context,
+                action,
+                resource,
+                object_id,
+                None,
+                "CrossSiteRequest",
+            )
             return problem(403, title="Cross-site admin mutation rejected")
         origin = context.req.header("origin")
         try:
@@ -541,7 +647,7 @@ class AdminSite:
         except ValueError:
             normalized = None
         if normalized not in self._trusted_origins:
-            await self._failure(action, resource, object_id, None, "InvalidOrigin")
+            await self._failure(context, action, resource, object_id, None, "InvalidOrigin")
             return problem(403, title="Admin mutation origin rejected")
         return None
 
@@ -656,6 +762,7 @@ class AdminSite:
 
     async def _event(
         self,
+        context: Context,
         phase: AuditPhase,
         action: AdminAction,
         resource: AdminResource,
@@ -663,7 +770,15 @@ class AdminSite:
         actor: Actor | None,
         error_type: str | None = None,
     ) -> None:
-        await self._audit(
+        sink = self._audit
+        if sink is None:
+            factory = self._audit_factory
+            if factory is None:
+                raise RuntimeError("admin audit configuration is missing")
+            sink = factory(context)
+        if not callable(sink):
+            raise TypeError("admin audit_factory returned an invalid sink")
+        await sink(
             AuditEvent(
                 occurred_at=datetime.now(UTC),
                 phase=phase,
@@ -677,6 +792,7 @@ class AdminSite:
 
     async def _failure(
         self,
+        context: Context,
         action: AdminAction,
         resource: AdminResource,
         object_id: str | None,
@@ -684,6 +800,7 @@ class AdminSite:
         error_type: str,
     ) -> None:
         await self._event(
+            context,
             "failure",
             action,
             resource,

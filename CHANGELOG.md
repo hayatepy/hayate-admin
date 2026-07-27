@@ -16,3 +16,6 @@ All notable changes to hayate-admin are documented here.
 - Add an executable SQLite reference using hayate-auth sessions, separately
   provisioned roles, generated hayate-sql CRUD, persistent redacted audit
   events, and a real Chromium flow.
+- Add request-scoped repository and audit factories plus a pinned native
+  Workers/D1 gate that reuses the same resource and generated query facade
+  without ASGI.

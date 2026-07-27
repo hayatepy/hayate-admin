@@ -18,27 +18,16 @@ from hayate_sql.adapters import SQLiteDatabase
 from hayate_admin import (
     Actor,
     AdminAction,
-    AdminField,
     AdminResource,
     AdminSite,
-    AdminValidationError,
     AuditEvent,
-    ListQuery,
-    Page,
-    Record,
 )
 
+from ..tasks import TaskRepository, task_resource
+from . import generated_queries as task_queries
 from .generated_queries import (
-    count_tasks,
     create_admin_audit_event,
-    create_task,
-    delete_task,
     get_admin_role,
-    get_task,
-    list_tasks_default,
-    list_tasks_name_asc,
-    list_tasks_name_desc,
-    update_task,
     upsert_admin_role,
 )
 
@@ -79,149 +68,6 @@ def initialize_database(path: str | Path) -> None:
         connection.executescript(migration)
     finally:
         connection.close()
-
-
-def _integer_id(object_id: str) -> int | None:
-    try:
-        value = int(object_id)
-    except ValueError:
-        return None
-    return value if value > 0 else None
-
-
-def _task_record(row: Mapping[str, object]) -> Record:
-    return {
-        "id": row["id"],
-        "name": row["name"],
-        "status": row["status"],
-        "active": bool(row["active"]),
-        "notes": row["notes"],
-    }
-
-
-def _string(values: Mapping[str, object], name: str) -> str:
-    value = values.get(name)
-    if not isinstance(value, str):
-        raise AdminValidationError({name: "A string value is required."})
-    return value
-
-
-def _boolean(values: Mapping[str, object], name: str) -> bool:
-    value = values.get(name)
-    if not isinstance(value, bool):
-        raise AdminValidationError({name: "A boolean value is required."})
-    return value
-
-
-class TaskRepository:
-    """Static query selection; request data is never interpolated into SQL."""
-
-    def __init__(self, database: SQLiteDatabase) -> None:
-        self._database = database
-
-    async def list(self, query: ListQuery) -> Page:
-        search = query.search or ""
-        status = query.filters.get("status", "")
-        async with self._database.transaction():
-            total = await count_tasks(self._database, search=search, status=status)
-            if query.order_by is None:
-                rows = await list_tasks_default(
-                    self._database,
-                    search=search,
-                    status=status,
-                    limit=query.limit,
-                    offset=query.offset,
-                )
-            elif query.order_by == "name" and query.descending:
-                rows = await list_tasks_name_desc(
-                    self._database,
-                    search=search,
-                    status=status,
-                    limit=query.limit,
-                    offset=query.offset,
-                )
-            elif query.order_by == "name":
-                rows = await list_tasks_name_asc(
-                    self._database,
-                    search=search,
-                    status=status,
-                    limit=query.limit,
-                    offset=query.offset,
-                )
-            else:
-                raise ValueError(f"unsupported task order: {query.order_by!r}")
-        return Page(tuple(_task_record(row) for row in rows), total["total"])
-
-    async def get(self, object_id: str) -> Record | None:
-        task_id = _integer_id(object_id)
-        if task_id is None:
-            return None
-        row = await get_task(self._database, id=task_id)
-        return None if row is None else _task_record(row)
-
-    async def create(self, values: Mapping[str, object]) -> Record:
-        row = await create_task(
-            self._database,
-            name=_string(values, "name"),
-            status=_string(values, "status"),
-            active=_boolean(values, "active"),
-            notes=_string(values, "notes"),
-        )
-        return _task_record(row)
-
-    async def update(
-        self,
-        object_id: str,
-        values: Mapping[str, object],
-    ) -> Record | None:
-        task_id = _integer_id(object_id)
-        if task_id is None:
-            return None
-        row = await update_task(
-            self._database,
-            id=task_id,
-            name=_string(values, "name"),
-            status=_string(values, "status"),
-            active=_boolean(values, "active"),
-            notes=_string(values, "notes"),
-        )
-        return None if row is None else _task_record(row)
-
-    async def delete(self, object_id: str) -> bool:
-        task_id = _integer_id(object_id)
-        return task_id is not None and await delete_task(self._database, id=task_id) is not None
-
-
-def task_resource(repository: TaskRepository) -> AdminResource:
-    """One resource definition reused by direct, browser, and D1 gates."""
-    return AdminResource(
-        slug="tasks",
-        label="Tasks",
-        singular_label="Task",
-        repository=repository,
-        title_field="name",
-        fields=(
-            AdminField("id", "ID", required=False, read_only=True),
-            AdminField("name", "Name", searchable=True, sortable=True, max_length=120),
-            AdminField(
-                "status",
-                "Status",
-                kind="select",
-                choices=(("open", "Open"), ("closed", "Closed")),
-                filterable=True,
-            ),
-            AdminField("active", "Active", kind="checkbox", required=False),
-            AdminField(
-                "notes",
-                "Notes",
-                kind="textarea",
-                required=False,
-                list_display=False,
-                max_length=2000,
-            ),
-        ),
-        page_size=10,
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,7 +160,15 @@ def create_example(
         authorize=authorize,
         audit=audit,
     )
-    admin.add(task_resource(TaskRepository(database)))
+    admin.add(
+        task_resource(
+            TaskRepository(
+                database,
+                task_queries,
+                list_scope=database.transaction,
+            )
+        )
+    )
     admin.register(app)
 
     @app.get("/")
