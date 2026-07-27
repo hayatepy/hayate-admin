@@ -7,9 +7,11 @@ import pytest
 from hayate_admin import (
     Actor,
     AdminAsset,
+    AdminBulkAction,
     AdminField,
     AdminResource,
     AdminValidationError,
+    BulkActionResult,
     ListQuery,
     Page,
 )
@@ -113,6 +115,38 @@ def test_resource_rejects_unsafe_or_ambiguous_configuration():
         )
     with pytest.raises(ValueError, match="page_size"):
         AdminResource("items", "Items", "Item", (id_field,), repository, page_size=101)
+
+
+def test_bulk_action_and_result_contracts_fail_closed():
+    async def handler(context, repository, object_ids):
+        return BulkActionResult(object_ids)
+
+    action = AdminBulkAction("close", "Close selected", "resource:change", handler, 10)
+    assert action.max_selected == 10
+    assert BulkActionResult(("1",), {"2": "Not found."}).succeeded == ("1",)
+
+    with pytest.raises(ValueError, match="unsafe admin bulk action slug"):
+        AdminBulkAction("Bad", "Bad", "resource:change", handler)
+    with pytest.raises(ValueError, match="permission"):
+        AdminBulkAction("export", "Export", "resource:view", handler)
+    with pytest.raises(ValueError, match="max_selected"):
+        AdminBulkAction("close", "Close", "resource:change", handler, 101)
+    with pytest.raises(ValueError, match="unique"):
+        BulkActionResult(("1", "1"))
+    with pytest.raises(ValueError, match="overlap"):
+        BulkActionResult(("1",), {"1": "Failed."})
+
+    repository = EmptyRepository()
+    id_field = AdminField("id", "ID", required=False, read_only=True)
+    with pytest.raises(ValueError, match="bulk action slugs must be unique"):
+        AdminResource(
+            "items",
+            "Items",
+            "Item",
+            (id_field,),
+            repository,
+            bulk_actions=(action, action),
+        )
 
 
 def test_actor_asset_query_and_page_invariants():

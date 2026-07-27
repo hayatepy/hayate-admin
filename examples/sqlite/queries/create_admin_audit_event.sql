@@ -2,6 +2,7 @@
 -- param: occurred_at str
 -- param: phase str
 -- param: action str
+-- param: operation str?
 -- param: resource str
 -- param: object_id str?
 -- param: actor_id str?
@@ -10,9 +11,10 @@ INSERT INTO admin_audit_event (
     occurred_at,
     phase,
     action,
+    operation,
     resource,
     object_id,
     actor_id,
     error_type
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)

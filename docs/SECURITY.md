@@ -15,6 +15,10 @@ Resource-level permission is not object-level permission: object routes call
 the policy again with the decoded ID. Hiding a link is never an authorization
 decision.
 
+Bulk POSTs require `resource:bulk`, the action's declared change/delete
+permission at resource scope, and that permission again for every selected
+object ID. Any denial stops the entire callback before storage runs.
+
 ## Cross-site requests
 
 Every POST requires an `Origin` exactly matching `allowed_origins`. Requests
@@ -23,7 +27,8 @@ storage. Session cookies must still be `Secure`, `HttpOnly`, and an appropriate
 `SameSite` value. Origin checking does not replace authentication.
 
 Only bounded `application/x-www-form-urlencoded` forms are accepted in the
-initial release. File uploads and unexpected or duplicate fields fail closed.
+initial release. File uploads, unexpected fields, and duplicate scalar fields
+fail closed. Repeated `selected` values are accepted only by the bulk route.
 
 ## Output and browser policy
 
@@ -46,6 +51,12 @@ Generated hayate-sql functions are the recommended boundary. Transactions,
 optimistic concurrency, referential integrity, and row-level authorization
 remain repository responsibilities.
 
+Bulk callbacks receive only the request context, resolved repository, and a
+deduplicated tuple of at most 100 already-authorized IDs. They must return a
+`BulkActionResult` that partitions every ID into success or failure. The
+repository owns all-or-nothing versus partial transaction semantics; failure
+messages must not contain secrets or submitted record values.
+
 Cloudflare D1 and similar runtime bindings exist only on the request context.
 Use an `AdminRepositoryFactory` to resolve the repository from that context;
 never mutate a global repository to point at the current request. The factory
@@ -54,8 +65,8 @@ is synchronous and must return a complete repository before an operation runs.
 ## Audit boundary
 
 `AuditEvent` intentionally contains no submitted values, record snapshots, SQL,
-headers, cookies, or tokens. It records time, phase, action, resource, object
-ID, actor ID, and error type.
+headers, cookies, or tokens. It records time, phase, action, optional registered
+operation slug, resource, object ID, actor ID, and error type.
 
 The injected sink should be durable. An attempt-event failure stops the
 mutation. A success-event failure occurs after the repository returned and
@@ -74,6 +85,7 @@ required.
 - search: 200 characters;
 - filter choices: 100 per field;
 - page size: 100 records;
+- selected bulk IDs: 100, or the action's lower declared limit;
 - page number: 1–1,000,000;
 - repository result: no more than the requested page.
 

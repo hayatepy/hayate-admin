@@ -43,6 +43,7 @@ _ROLE_ACTIONS: dict[str, frozenset[AdminAction]] = {
             "resource:add",
             "resource:change",
             "resource:delete",
+            "resource:bulk",
         }
     ),
 }
@@ -65,6 +66,7 @@ def audit_factory(context: Context) -> AuditSink:
             occurred_at=event.occurred_at.isoformat(),
             phase=event.phase,
             action=event.action,
+            operation=event.operation,
             resource=event.resource or "site",
             object_id=event.object_id,
             actor_id=event.actor_id,

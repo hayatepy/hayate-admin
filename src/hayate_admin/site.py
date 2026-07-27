@@ -23,6 +23,7 @@ from .contracts import (
     Actor,
     AdminAction,
     AdminAsset,
+    AdminBulkAction,
     AdminResource,
     AdminValidationError,
     AuditEvent,
@@ -30,6 +31,7 @@ from .contracts import (
     AuditSink,
     AuditSinkFactory,
     Authorizer,
+    BulkActionResult,
     ListQuery,
     Page,
     Record,
@@ -156,6 +158,10 @@ class AdminSite:
         async def admin_create(context: Context) -> Response:
             return await self._create(context)
 
+        @app.post(f"{prefix}/:resource/bulk")
+        async def admin_bulk(context: Context) -> Response:
+            return await self._bulk(context)
+
         @app.get(f"{prefix}/:resource/object/:object_id")
         async def admin_detail(context: Context) -> Response:
             return await self._detail(context)
@@ -231,6 +237,15 @@ class AdminSite:
             return problem(400, title="Invalid admin list query", detail=str(error))
         page = await resource.repository_for(context).list(query)
         self._validate_page(resource, query, page)
+        bulk_actions: tuple[AdminBulkAction, ...] = ()
+        if resource.bulk_actions and (
+            await self._allowed(context, "resource:bulk", resource) is not None
+        ):
+            visible_actions = []
+            for action in resource.bulk_actions:
+                if await self._allowed(context, action.required_action, resource) is not None:
+                    visible_actions.append(action)
+            bulk_actions = tuple(visible_actions)
         content = self._renderer.listing(
             resource,
             page,
@@ -238,6 +253,7 @@ class AdminSite:
             can_add=await self._allowed(context, "resource:add", resource) is not None,
             can_change=await self._allowed(context, "resource:change", resource) is not None,
             can_delete=await self._allowed(context, "resource:delete", resource) is not None,
+            bulk_actions=bulk_actions,
         )
         return self._renderer.response(
             context,
@@ -430,6 +446,126 @@ class AdminSite:
         self._validate_record(resource, record)
         await self._event(context, "success", "resource:add", resource, object_id, actor)
         return self._redirect(context, self._record_location(resource, object_id))
+
+    async def _bulk(self, context: Context) -> Response:
+        resource = self._resource(context)
+        if resource is None:
+            return self._not_found()
+        guard = await self._guard_mutation(context, "resource:bulk", resource, None)
+        if guard is not None:
+            return guard
+        actor = await self._allowed(context, "resource:bulk", resource)
+        if actor is None:
+            await self._failure(
+                context,
+                "resource:bulk",
+                resource,
+                None,
+                None,
+                "AuthorizationDenied",
+            )
+            return self._forbidden()
+        parsed = await self._parse_bulk_form(context, resource, actor)
+        if isinstance(parsed, Response):
+            await self._failure(
+                context,
+                "resource:bulk",
+                resource,
+                None,
+                actor,
+                "InvalidBulkForm",
+            )
+            return parsed
+        action, object_ids = parsed
+        if await self._allowed(context, action.required_action, resource) is None:
+            await self._failure(
+                context,
+                "resource:bulk",
+                resource,
+                None,
+                actor,
+                "AuthorizationDenied",
+                operation=action.slug,
+            )
+            return self._forbidden()
+        for object_id in object_ids:
+            if (
+                await self._allowed(
+                    context,
+                    action.required_action,
+                    resource,
+                    object_id,
+                )
+                is None
+            ):
+                await self._failure(
+                    context,
+                    "resource:bulk",
+                    resource,
+                    object_id,
+                    actor,
+                    "AuthorizationDenied",
+                    operation=action.slug,
+                )
+                return self._forbidden()
+
+        for object_id in object_ids:
+            await self._event(
+                context,
+                "attempt",
+                "resource:bulk",
+                resource,
+                object_id,
+                actor,
+                operation=action.slug,
+            )
+        try:
+            result = await action.handler(
+                context,
+                resource.repository_for(context),
+                object_ids,
+            )
+            self._validate_bulk_result(object_ids, result)
+        except Exception as error:
+            for object_id in object_ids:
+                await self._failure(
+                    context,
+                    "resource:bulk",
+                    resource,
+                    object_id,
+                    actor,
+                    type(error).__name__,
+                    operation=action.slug,
+                )
+            raise
+
+        for object_id in result.succeeded:
+            await self._event(
+                context,
+                "success",
+                "resource:bulk",
+                resource,
+                object_id,
+                actor,
+                operation=action.slug,
+            )
+        for object_id in result.failed:
+            await self._failure(
+                context,
+                "resource:bulk",
+                resource,
+                object_id,
+                actor,
+                "BulkActionFailed",
+                operation=action.slug,
+            )
+        content = self._renderer.bulk_result(resource, action, result)
+        return self._renderer.response(
+            context,
+            title=action.label,
+            actor=actor,
+            content=content,
+        )
 
     async def _edit_form(self, context: Context) -> Response:
         resource = self._resource(context)
@@ -706,6 +842,73 @@ class AdminSite:
             MappingProxyType(errors),
         )
 
+    async def _parse_bulk_form(
+        self,
+        context: Context,
+        resource: AdminResource,
+        actor: Actor,
+    ) -> tuple[AdminBulkAction, tuple[str, ...]] | Response:
+        content_type = (context.req.header("content-type") or "").partition(";")[0].strip().lower()
+        if content_type != "application/x-www-form-urlencoded":
+            return problem(415, title="Admin forms require application/x-www-form-urlencoded")
+        limits = FormDataLimits(
+            max_body_bytes=_FORM_BODY_LIMIT,
+            max_file_bytes=0,
+            max_field_bytes=512,
+            max_parts=101,
+            max_header_bytes=8 * 1024,
+            file_memory_bytes=0,
+        )
+        try:
+            form = await context.req.form_data(limits)
+        except (FormDataLimitError, TypeError) as form_error:
+            return problem(413, title="Admin bulk form rejected", detail=str(form_error))
+
+        action_slug: str | None = None
+        object_ids: list[str] = []
+        error: str | None = None
+        async with form:
+            for name, value in form:
+                if isinstance(value, File):
+                    error = "File uploads are not accepted by bulk actions."
+                elif name == "action":
+                    if action_slug is not None:
+                        error = "Submit exactly one bulk action."
+                    else:
+                        action_slug = value
+                elif name == "selected":
+                    if (
+                        not value
+                        or len(value) > 255
+                        or any(ord(character) < 0x20 for character in value)
+                    ):
+                        error = "Selected object IDs must be bounded printable strings."
+                    else:
+                        object_ids.append(value)
+                else:
+                    error = "The bulk form contains an unexpected field."
+
+        if error is None and action_slug is None:
+            error = "Choose a bulk action."
+        action = None if action_slug is None else resource.bulk_action_map.get(action_slug)
+        if error is None and action is None:
+            error = "Choose a registered bulk action."
+        unique_ids = tuple(dict.fromkeys(object_ids))
+        if error is None and not unique_ids:
+            error = "Select at least one record."
+        if error is None and action is not None and len(object_ids) > action.max_selected:
+            error = f"Select at most {action.max_selected} records."
+        if error is not None or action is None:
+            content = self._renderer.bulk_error(resource, error or "The bulk form is invalid.")
+            return self._renderer.response(
+                context,
+                title="Bulk action rejected",
+                actor=actor,
+                content=content,
+                status=422,
+            )
+        return action, unique_ids
+
     def _form_error_response(
         self,
         context: Context,
@@ -745,6 +948,17 @@ class AdminSite:
         return safe or {"__all__": "The record could not be saved."}
 
     @staticmethod
+    def _validate_bulk_result(
+        selected: tuple[str, ...],
+        result: BulkActionResult,
+    ) -> None:
+        if not isinstance(result, BulkActionResult):
+            raise TypeError("admin bulk action returned an invalid result")
+        returned = tuple(result.succeeded) + tuple(result.failed)
+        if len(returned) != len(selected) or set(returned) != set(selected):
+            raise ValueError("admin bulk action result must partition every selected object")
+
+    @staticmethod
     def _record_id(resource: AdminResource, record: Record) -> str:
         value = record.get(resource.id_field)
         if value is None:
@@ -769,6 +983,7 @@ class AdminSite:
         object_id: str | None,
         actor: Actor | None,
         error_type: str | None = None,
+        operation: str | None = None,
     ) -> None:
         sink = self._audit
         if sink is None:
@@ -787,6 +1002,7 @@ class AdminSite:
                 object_id=object_id,
                 actor_id=None if actor is None else actor.id,
                 error_type=error_type,
+                operation=operation,
             )
         )
 
@@ -798,6 +1014,8 @@ class AdminSite:
         object_id: str | None,
         actor: Actor | None,
         error_type: str,
+        *,
+        operation: str | None = None,
     ) -> None:
         await self._event(
             context,
@@ -807,4 +1025,5 @@ class AdminSite:
             object_id,
             actor,
             error_type,
+            operation,
         )

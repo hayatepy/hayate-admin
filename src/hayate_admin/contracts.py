@@ -18,6 +18,7 @@ type AdminAction = Literal[
     "resource:add",
     "resource:change",
     "resource:delete",
+    "resource:bulk",
 ]
 type FieldKind = Literal[
     "text",
@@ -295,6 +296,80 @@ def _is_repository(value: object) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
+class BulkActionResult:
+    """Complete per-object outcome returned by an explicit bulk callback."""
+
+    succeeded: Sequence[str]
+    failed: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.succeeded, Sequence)
+            or isinstance(self.succeeded, (str, bytes))
+            or any(not isinstance(object_id, str) or not object_id for object_id in self.succeeded)
+        ):
+            raise ValueError("bulk succeeded IDs must be a sequence of non-empty strings")
+        succeeded = tuple(self.succeeded)
+        if len(succeeded) != len(set(succeeded)):
+            raise ValueError("bulk succeeded IDs must be unique")
+        if not isinstance(self.failed, Mapping) or any(
+            not isinstance(object_id, str)
+            or not object_id
+            or not isinstance(message, str)
+            or not message
+            or len(message) > 500
+            for object_id, message in self.failed.items()
+        ):
+            raise ValueError("bulk failures must contain bounded object messages")
+        if set(succeeded) & set(self.failed):
+            raise ValueError("bulk succeeded and failed IDs must not overlap")
+        if len(succeeded) + len(self.failed) > 100:
+            raise ValueError("bulk results must not exceed 100 objects")
+        object.__setattr__(self, "succeeded", succeeded)
+        object.__setattr__(self, "failed", MappingProxyType(dict(self.failed)))
+
+
+class BulkActionHandler(Protocol):
+    """Execute one allowlisted action against already-authorized object IDs."""
+
+    def __call__(
+        self,
+        context: Context,
+        repository: AdminRepository,
+        object_ids: tuple[str, ...],
+    ) -> Awaitable[BulkActionResult]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class AdminBulkAction:
+    """One bounded resource action with an explicit permission and callback."""
+
+    slug: str
+    label: str
+    required_action: AdminAction
+    handler: BulkActionHandler = field(repr=False, compare=False)
+    max_selected: int = 100
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.slug, str) or not _SLUG.fullmatch(self.slug):
+            raise ValueError(f"unsafe admin bulk action slug: {self.slug!r}")
+        if not isinstance(self.label, str) or not self.label or len(self.label) > 120:
+            raise ValueError(f"{self.slug}: bulk action label must be 1-120 characters")
+        if self.required_action not in ("resource:change", "resource:delete"):
+            raise ValueError(
+                f"{self.slug}: bulk action permission must be resource:change or resource:delete"
+            )
+        if not callable(self.handler):
+            raise ValueError(f"{self.slug}: bulk action handler must be callable")
+        if (
+            not isinstance(self.max_selected, int)
+            or isinstance(self.max_selected, bool)
+            or not 1 <= self.max_selected <= 100
+        ):
+            raise ValueError(f"{self.slug}: max_selected must be in 1-100")
+
+
+@dataclass(frozen=True, slots=True)
 class AdminResource:
     """Explicit operational surface for one record family."""
 
@@ -303,6 +378,7 @@ class AdminResource:
     singular_label: str
     fields: tuple[AdminField, ...]
     repository: AdminRepository | AdminRepositoryFactory
+    bulk_actions: tuple[AdminBulkAction, ...] = ()
     id_field: str = "id"
     title_field: str = "id"
     page_size: int = 50
@@ -338,6 +414,13 @@ class AdminResource:
             raise ValueError(
                 f"{self.slug}: repository must implement all operations or be a factory"
             )
+        if not isinstance(self.bulk_actions, tuple) or any(
+            not isinstance(action, AdminBulkAction) for action in self.bulk_actions
+        ):
+            raise ValueError(f"{self.slug}: bulk_actions must contain AdminBulkAction values")
+        action_slugs = [action.slug for action in self.bulk_actions]
+        if len(action_slugs) != len(set(action_slugs)):
+            raise ValueError(f"{self.slug}: bulk action slugs must be unique")
         if (
             not isinstance(self.page_size, int)
             or isinstance(self.page_size, bool)
@@ -358,6 +441,10 @@ class AdminResource:
             raise TypeError(f"{self.slug}: repository factory returned an invalid repository")
         return resolved
 
+    @property
+    def bulk_action_map(self) -> Mapping[str, AdminBulkAction]:
+        return MappingProxyType({action.slug: action for action in self.bulk_actions})
+
 
 @dataclass(frozen=True, slots=True)
 class AuditEvent:
@@ -370,6 +457,7 @@ class AuditEvent:
     object_id: str | None
     actor_id: str | None
     error_type: str | None = None
+    operation: str | None = None
 
 
 class Authorizer(Protocol):

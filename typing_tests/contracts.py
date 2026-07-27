@@ -5,7 +5,14 @@ from typing import assert_type
 
 from hayate import Context
 
-from hayate_admin import AdminRepository, AdminRepositoryFactory, ListQuery, Page
+from hayate_admin import (
+    AdminRepository,
+    AdminRepositoryFactory,
+    BulkActionHandler,
+    BulkActionResult,
+    ListQuery,
+    Page,
+)
 
 
 class Repository:
@@ -39,3 +46,15 @@ def repository_factory(context: Context) -> AdminRepository:
 
 factory: AdminRepositoryFactory = repository_factory
 assert_type(factory, AdminRepositoryFactory)
+
+
+async def bulk_handler(
+    context: Context,
+    repository: AdminRepository,
+    object_ids: tuple[str, ...],
+) -> BulkActionResult:
+    return BulkActionResult(object_ids)
+
+
+handler: BulkActionHandler = bulk_handler
+assert_type(handler, BulkActionHandler)

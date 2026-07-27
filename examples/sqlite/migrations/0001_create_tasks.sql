@@ -11,6 +11,7 @@ CREATE TABLE admin_audit_event (
     occurred_at TEXT NOT NULL,
     phase TEXT NOT NULL CHECK (phase IN ('attempt', 'success', 'failure')),
     action TEXT NOT NULL,
+    operation TEXT,
     resource TEXT NOT NULL,
     object_id TEXT,
     actor_id TEXT,

@@ -243,6 +243,19 @@ grep -Eiq '^location: /admin/tasks/object/1' "${headers_file}"
 restart_worker
 
 status="$(
+  curl --silent --output "${body_file}" --write-out '%{http_code}' \
+    -H 'Authorization: Bearer operator' \
+    -H "Origin: ${origin}" \
+    -H 'Sec-Fetch-Site: same-origin' \
+    --data-urlencode 'action=close' \
+    --data-urlencode 'selected=1' \
+    --data-urlencode 'selected=missing' \
+    "${origin}/admin/tasks/bulk"
+)"
+test "${status}" = "200"
+grep -Fq "1 completed; 1 failed." "${body_file}"
+
+status="$(
   curl --silent --dump-header "${headers_file}" --output "${body_file}" \
     --write-out '%{http_code}' \
     -H 'Authorization: Bearer operator' \
@@ -254,6 +267,8 @@ status="$(
     "${origin}/admin/tasks/create"
 )"
 test "${status}" = "303"
+
+restart_worker
 
 status="$(
   curl --silent --output "${body_file}" --write-out '%{http_code}' \
@@ -288,6 +303,8 @@ status="$(
     "${origin}/admin/tasks/object/1/edit"
 )"
 test "${status}" = "303"
+
+restart_worker
 
 status="$(
   curl --silent --dump-header "${headers_file}" --output "${body_file}" \
@@ -325,11 +342,18 @@ import sys
 from pathlib import Path
 
 events = json.loads(Path(sys.argv[1]).read_text())
-assert len(events) == 12, events
-assert [event["phase"] for event in events].count("success") == 4
+assert len(events) == 16, events
+assert [event["phase"] for event in events].count("success") == 5
 assert any(event["error_type"] == "CrossSiteRequest" for event in events)
 assert any(event["error_type"] == "AuthorizationDenied" for event in events)
 assert any(event["error_type"] == "ValidationError" for event in events)
+assert sum(event["operation"] == "close" for event in events) == 4
+assert any(
+    event["operation"] == "close"
+    and event["object_id"] == "missing"
+    and event["error_type"] == "BulkActionFailed"
+    for event in events
+)
 serialized = json.dumps(events, sort_keys=True)
 for forbidden in (
     "d1-sentinel",
@@ -346,10 +370,11 @@ for event in events:
         "occurred_at",
         "phase",
         "action",
+        "operation",
         "resource",
         "object_id",
         "actor_id",
         "error_type",
     }
-print("workerd D1 admin: authorization origin validation escaping CRUD htmx audit")
+print("workerd D1 admin: authorization origin validation escaping CRUD bulk htmx audit")
 PY
