@@ -4,6 +4,18 @@ All notable changes to hayate-admin are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Add immutable per-site message catalogs with English defaults, validated
+  locale tags and placeholders, localized navigation/forms/validation/history/
+  bulk/relationship/empty/error states, and no ambient locale mutation.
+- Add escaped plain-text branding plus contrast-checked color and density
+  tokens, rendered through a deterministic stylesheet authorized by an exact
+  CSP hash.
+- Add semantic landmarks, skip navigation, visible keyboard focus,
+  reduced-motion handling, and a pinned axe-core Chromium gate across real
+  CRUD, bulk, history, relationship, inline, saved-view, and delete flows.
+
 ## [0.2.0] - 2026-07-28
 
 ### Added

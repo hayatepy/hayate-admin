@@ -140,7 +140,7 @@ async def test_generated_sqlite_repository_sessions_permissions_and_redacted_aud
         )
         history_body = await history.text()
         assert history.status == 200
-        assert "resource:bulk / close" in history_body
+        assert "Run bulk action / close" in history_body
         assert "form-value-must-not-reach-audit" not in history_body
         assert "Updated task" not in history_body
         viewer_history = await example.app.request(

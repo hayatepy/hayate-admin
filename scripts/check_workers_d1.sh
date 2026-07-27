@@ -642,7 +642,7 @@ status="$(
 )"
 test "${status}" = "200"
 grep -Fq "History for 1" "${body_file}"
-grep -Fq "resource:bulk / close" "${body_file}"
+grep -Fq "Run bulk action / close" "${body_file}"
 if grep -Fq "d1-bound-secret" "${body_file}"; then
   echo "submitted value reached D1 object history" >&2
   exit 1

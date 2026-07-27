@@ -25,6 +25,7 @@ pytestmark = [
 
 PASSWORD = "correct horse battery staple"
 SECRET = "browser-test-secret"
+AXE_PATH = Path(__file__).parents[2] / "node_modules/axe-core/axe.min.js"
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,13 +87,35 @@ async def live_example(tmp_path: Path) -> AsyncIterator[LiveExample]:
 
 async def _create_task(page: Page, name: str, status: str) -> None:
     await page.get_by_role("link", name="Add Task").click()
+    await _assert_accessible(page, "create form")
     await page.get_by_label("Name").fill(name)
     await page.get_by_label("Status").select_option(status)
     await page.get_by_label("Active").check()
     await page.get_by_label("Notes").fill(f"Notes for {name}")
     await page.get_by_role("button", name="Create").click()
     await expect(page.get_by_role("heading", name=name)).to_be_visible()
+    await _assert_accessible(page, "created record detail")
     await page.get_by_role("link", name="Back to Tasks").click()
+
+
+async def _assert_accessible(page: Page, state: str) -> None:
+    results = await page.evaluate(
+        """async () => await axe.run(document, {
+            runOnly: {
+                type: "tag",
+                values: ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"]
+            }
+        })"""
+    )
+    violations = results["violations"]
+    details = []
+    for violation in violations:
+        targets = [", ".join(str(part) for part in node["target"]) for node in violation["nodes"]]
+        details.append(
+            f"{violation['id']} ({violation['impact']}): "
+            f"{violation['help']} at {'; '.join(targets)}"
+        )
+    assert violations == [], f"{state}: " + " | ".join(details)
 
 
 async def test_real_browser_create_search_filter_sort_edit_delete(
@@ -105,6 +128,7 @@ async def test_real_browser_create_search_filter_sort_edit_delete(
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch()
         context = await browser.new_context()
+        await context.add_init_script(path=AXE_PATH)
         login = await context.request.post(
             f"{live_example.url}/api/auth/sign-in/email",
             headers={"origin": live_example.url, "sec-fetch-site": "same-origin"},
@@ -131,15 +155,22 @@ async def test_real_browser_create_search_filter_sort_edit_delete(
 
         await page.goto(f"{live_example.url}/admin/tasks")
         await expect(page.get_by_role("heading", name="Tasks")).to_be_visible()
+        await _assert_accessible(page, "empty list")
+        await page.keyboard.press("Tab")
+        await expect(page.locator(".skip-link")).to_be_focused()
+        await page.keyboard.press("Enter")
+        await expect(page.locator("#hayate-admin")).to_be_focused()
         await _create_task(page, "Zulu task", "open")
         await _create_task(page, "Alpha task", "closed")
 
         await page.get_by_role("link", name="Add Task").click()
         await page.get_by_role("link", name="Search Parent task").click()
         await expect(page.get_by_role("heading", name="Choose Parent task")).to_be_visible()
+        await _assert_accessible(page, "relationship chooser")
         await page.get_by_label("Search Parent task").fill("Alpha")
         await page.get_by_role("button", name="Search").click()
         await expect(page.get_by_role("status")).to_contain_text("1 matching authorized record.")
+        await _assert_accessible(page, "relationship search results")
         await page.get_by_role("link", name="Choose").click()
         await expect(page.get_by_label("Parent task")).to_have_value("2")
         await page.get_by_label("Name").fill("Related child")
@@ -149,6 +180,7 @@ async def test_real_browser_create_search_filter_sort_edit_delete(
         await page.get_by_role("button", name="Create").click()
         await expect(page.get_by_role("heading", name="Related child")).to_be_visible()
         await expect(page.get_by_role("link", name="Alpha task")).to_be_visible()
+        await _assert_accessible(page, "relationship record detail")
 
         await page.goto(f"{live_example.url}/admin/tasks")
         await expect(page.locator("tbody tr")).to_have_count(2)
@@ -160,9 +192,11 @@ async def test_real_browser_create_search_filter_sort_edit_delete(
 
         await page.goto(f"{live_example.url}/admin/tasks/object/2/inline/subtasks")
         await expect(page.get_by_role("heading", name="Subtasks for Alpha task")).to_be_visible()
+        await _assert_accessible(page, "inline editor")
         await expect(page.locator('input[value="Related child"]')).to_have_count(1)
         await page.get_by_role("button", name="Delete inline record").click()
         await expect(page.locator('input[value="Related child"]')).to_have_count(0)
+        await _assert_accessible(page, "inline delete result")
         await page.get_by_role("link", name="Back to parent record").click()
         await page.get_by_role("link", name="Back to Tasks").click()
 
@@ -170,12 +204,14 @@ async def test_real_browser_create_search_filter_sort_edit_delete(
         rows = page.locator("tbody tr")
         await expect(rows).to_have_count(2)
         await expect(rows.nth(0)).to_contain_text("Alpha task")
+        await _assert_accessible(page, "sortable bulk list")
 
         await page.get_by_label("Select Zulu task").check()
         await page.get_by_label("Action").select_option("close")
         await page.get_by_role("button", name="Apply to selected").click()
         await expect(page.get_by_role("heading", name="Close selected")).to_be_visible()
         await expect(page.get_by_role("status")).to_contain_text("1 completed; 0 failed.")
+        await _assert_accessible(page, "bulk result")
         await page.get_by_role("link", name="Return to Tasks").click()
 
         await page.get_by_role("link", name="Closed tasks by name").click()
@@ -184,6 +220,7 @@ async def test_real_browser_create_search_filter_sort_edit_delete(
             "page",
         )
         await expect(page.locator("tbody tr")).to_have_count(2)
+        await _assert_accessible(page, "saved view")
         async with page.expect_download() as download_info:
             await page.get_by_role("link", name="Export CSV").click()
         download = await download_info.value
@@ -209,21 +246,26 @@ async def test_real_browser_create_search_filter_sort_edit_delete(
         await expect(page.locator("tbody tr")).to_contain_text("Alpha task")
 
         await page.get_by_role("link", name="Edit").click()
+        await _assert_accessible(page, "edit form")
         await page.get_by_label("Name").fill("Beta task")
         await page.get_by_label("Status").select_option("open")
         await page.get_by_role("button", name="Save changes").click()
         await expect(page.get_by_role("heading", name="Beta task")).to_be_visible()
+        await _assert_accessible(page, "updated record detail")
 
         await page.get_by_role("link", name="History").click()
         await expect(page.get_by_role("heading", name="History for 2")).to_be_visible()
         await expect(page.get_by_text("submitted values are not recorded")).to_be_visible()
         await expect(page.get_by_text("Beta task")).to_have_count(0)
+        await _assert_accessible(page, "history")
         await page.get_by_role("link", name="Back to record").click()
 
         await page.get_by_role("link", name="Delete").click()
+        await _assert_accessible(page, "delete confirmation")
         await page.get_by_role("button", name="Confirm delete").click()
         await expect(page.get_by_role("heading", name="Tasks")).to_be_visible()
         await expect(page.get_by_text("Beta task")).to_have_count(0)
+        await _assert_accessible(page, "delete result")
 
         assert console_errors == []
         assert page_errors == []

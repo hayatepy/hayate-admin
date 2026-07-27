@@ -6,11 +6,15 @@ from typing import assert_type
 from hayate import Context
 
 from hayate_admin import (
+    ENGLISH_MESSAGES,
+    AdminBranding,
     AdminInline,
+    AdminMessages,
     AdminRelationship,
     AdminRepository,
     AdminRepositoryFactory,
     AdminResource,
+    AdminTheme,
     AuditHistoryPage,
     AuditHistoryReader,
     AuditHistoryReaderFactory,
@@ -32,6 +36,11 @@ from hayate_admin import (
     RelationshipResolver,
     RelationshipSearcher,
 )
+
+messages: AdminMessages = ENGLISH_MESSAGES
+branding = AdminBranding(wordmark="Operations", theme=AdminTheme(density="compact"))
+assert_type(messages.text("list.search"), str)
+assert_type(branding.theme, AdminTheme)
 
 
 class Repository:

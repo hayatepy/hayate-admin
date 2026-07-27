@@ -10,10 +10,10 @@ checked SQL rather than ORM or database reflection.
 > **Status: pre-release.** The typed CRUD and security core is implemented.
 > The SQLite/generated-SQL, browser, and native Workers/D1 reference paths are
 > implemented, including explicit searchable relationships and bounded inline
-> editing, saved views, keyset cursors, and policy-safe CSV export. General
-> Django admin parity is not claimed; internationalization, theming, and the
-> breadth of Django's mature extension ecosystem remain outside the current
-> surface.
+> editing, saved views, keyset cursors, policy-safe CSV export, application-scoped
+> localization, bounded branding, and an automated WCAG A/AA audit. General
+> Django admin parity is not claimed; Django's ORM-derived workflows and mature
+> third-party extension ecosystem remain broader.
 
 `hayate-admin` is an internal management tool for trusted operators. Public,
 process-centric customer workflows should remain purpose-built application
@@ -263,6 +263,62 @@ AdminAsset(
 
 Read [the threat model](docs/SECURITY.md) before deploying.
 
+## Localization, branding, and accessibility
+
+`AdminMessages` is immutable and belongs to one `AdminSite`. English is the
+only bundled catalog; an application can provide a validated BCP 47-style
+locale tag and override any stable catalog key. Missing overrides fall back to
+English. There is no process-global active locale, import-time locale mutation,
+implicit request-language negotiation, or dependency on ambient thread state.
+
+```python
+from hayate_admin import AdminBranding, AdminMessages, AdminSite, AdminTheme
+
+messages = AdminMessages(
+    locale="ja",
+    overrides={
+        "accessibility.skip_to_main": "本文へ移動",
+        "list.search": "検索",
+        "list.apply": "適用",
+        "form.create_heading": "{item}を追加",
+        "validation.required": "必須項目です。",
+    },
+)
+branding = AdminBranding(
+    wordmark="Hayate 運用",
+    theme=AdminTheme(accent="#005EA8", density="compact"),
+)
+
+site = AdminSite(
+    title="Operations",
+    allowed_origins={"https://admin.example.com"},
+    authorize=authorize,
+    audit=audit,
+    messages=messages,
+    branding=branding,
+)
+```
+
+Templates accept only the named placeholders declared by the English source
+message. Resource labels, choice labels, application validator messages,
+record values, and date/number formatting remain application-owned. Count
+messages use explicit `.one` and `.other` keys rather than guessing a locale's
+plural rules.
+
+Branding is intentionally not a raw template hook. A wordmark is escaped plain
+text. Themes accept only six-digit color tokens and a
+`comfortable`/`compact` density; required text, link, muted text, and focus
+contrast is checked when the site is constructed. Arbitrary HTML, attributes,
+scripts, remote stylesheets, and custom CSS are not accepted. The deterministic
+stylesheet is authorized by its exact SHA-256 CSP hash.
+
+The Chromium gate runs pinned `axe-core` against the empty/list, create/edit,
+detail, relationship, inline, bulk, saved-view, history, and delete states
+using WCAG 2.0, 2.1, and 2.2 A/AA rule tags. The renderer also provides
+landmarks, a skip link, visible keyboard focus, reduced-motion handling, table
+headers/captions, explicit labels, and live status/error semantics. Automated
+checks do not replace keyboard, screen-reader, zoom, or human usability review.
+
 ## Current surface
 
 - resource index with per-resource authorization;
@@ -285,9 +341,10 @@ Read [the threat model](docs/SECURITY.md) before deploying.
 - full-page and htmx fragment representations;
 - ordinary `303` post/redirect/get and htmx `HX-Redirect`;
 - application-injected authorization and redacted audit events.
-
-Internationalization, theme/branding hooks, and the accessibility audit remain
-tracked Phase 2 work.
+- immutable per-site message catalogs with English defaults and safe custom
+  locale overlays;
+- plain-text branding and contrast-checked theme tokens under a hashed CSP;
+- a pinned real-browser WCAG A/AA axe audit over every operational flow.
 
 ## Executable SQLite reference
 
@@ -317,6 +374,8 @@ uv run ruff check src examples tests typing_tests
 uv run ruff format --check src examples tests typing_tests
 uv run mypy src examples typing_tests
 uv run pytest -q
+npm ci --ignore-scripts
+HAYATE_ADMIN_BROWSER_TESTS=1 uv run pytest tests/browser/test_sqlite_admin.py -q
 uv build
 uv run python scripts/check_dist.py
 ```

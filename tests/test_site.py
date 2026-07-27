@@ -14,15 +14,18 @@ from hayate import Hayate
 from hayate_admin import (
     Actor,
     AdminAction,
+    AdminBranding,
     AdminBulkAction,
     AdminCsvExport,
     AdminCursorError,
     AdminField,
     AdminInline,
+    AdminMessages,
     AdminRelationship,
     AdminResource,
     AdminSavedView,
     AdminSite,
+    AdminTheme,
     AdminValidationError,
     AuditEvent,
     AuditHistoryPage,
@@ -196,6 +199,8 @@ def make_app(
     saved_views: tuple[AdminSavedView, ...] = (),
     csv_export: AdminCsvExport | None = None,
     denied_export_ids: frozenset[str] = frozenset(),
+    messages: AdminMessages | None = None,
+    branding: AdminBranding | None = None,
 ):
     permitted = allowed or {
         "site:view",
@@ -231,6 +236,8 @@ def make_app(
         audit=audit,
         history=history,
         history_factory=history_factory,
+        messages=messages or AdminMessages(),
+        branding=branding,
     )
     site.add(
         resource(
@@ -362,6 +369,47 @@ async def test_list_query_is_allowlisted_bounded_and_safely_escaped():
     )
     assert repository.queries[-1].order_by is None
     assert repository.queries[-1].filters == {}
+
+
+async def test_localization_branding_and_accessibility_policy_are_site_scoped():
+    repository = MemoryRepository()
+    messages = AdminMessages(
+        locale="ja",
+        overrides={
+            "accessibility.skip_to_main": "本文へ移動",
+            "accessibility.signed_in": "ログイン中の管理者",
+            "list.search": "検索",
+            "list.apply": "適用",
+            "list.matching.other": "{count}件",
+            "action.view": "表示",
+            "action.edit": "編集",
+            "action.delete": "削除",
+        },
+    )
+    branding = AdminBranding(
+        wordmark="<Hayate 運用>",
+        theme=AdminTheme(density="compact"),
+    )
+    app, _, _, _ = make_app(
+        repository,
+        messages=messages,
+        branding=branding,
+    )
+    response = await app.request("/admin/users")
+    body = await response_text(response)
+    policy = response.headers.get("content-security-policy") or ""
+
+    assert response.status == 200
+    assert '<html lang="ja">' in body
+    assert ">本文へ移動</a>" in body
+    assert 'aria-label="ログイン中の管理者"' in body
+    assert "<Hayate 運用>" not in body
+    assert "&lt;Hayate 運用&gt;" in body
+    assert "<label>検索" in body
+    assert 'class="hayate-admin-density-compact"' in body
+    assert "@media(prefers-reduced-motion:reduce)" in body
+    assert "style-src 'sha256-" in policy
+    assert "'unsafe-inline'" not in policy
 
 
 async def test_saved_views_apply_only_registered_allowlisted_controls():
@@ -776,7 +824,7 @@ async def test_object_history_is_separately_authorized_bounded_and_escaped():
     response = await app.request("/admin/users/object/1/history")
     body = await response_text(response)
     assert response.status == 200
-    assert "resource:bulk / close" in body
+    assert "Run bulk action / close" in body
     assert "&lt;operator&gt;" in body
     assert "<operator>" not in body
     assert "BulkActionFailed" in body
