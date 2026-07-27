@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime
@@ -13,23 +16,27 @@ from hayate_sql import Database
 from hayate_admin import (
     AdminAction,
     AdminBulkAction,
+    AdminCsvExport,
+    AdminCursorError,
     AdminField,
     AdminInline,
     AdminRelationship,
     AdminRepository,
     AdminRepositoryFactory,
     AdminResource,
+    AdminSavedView,
     AdminValidationError,
     AuditEvent,
     AuditHistoryPage,
     AuditHistoryReader,
     AuditPhase,
     BulkActionResult,
+    CursorPage,
+    ExportQuery,
     InlineCollection,
     InlineMutation,
     InlineMutationResult,
     ListQuery,
-    Page,
     Record,
     RelationshipChoice,
     RelationshipPage,
@@ -84,6 +91,44 @@ class TaskQueryFacade(Protocol):
         status: str,
         limit: int,
         offset: int,
+    ) -> Sequence[Mapping[str, object]]: ...
+
+    async def list_tasks_cursor_default(
+        self,
+        db: Database,
+        /,
+        *,
+        tenant_key: str,
+        search: str,
+        status: str,
+        cursor_id: int,
+        limit: int,
+    ) -> Sequence[Mapping[str, object]]: ...
+
+    async def list_tasks_cursor_name_asc(
+        self,
+        db: Database,
+        /,
+        *,
+        tenant_key: str,
+        search: str,
+        status: str,
+        cursor_id: int,
+        cursor_name: str,
+        limit: int,
+    ) -> Sequence[Mapping[str, object]]: ...
+
+    async def list_tasks_cursor_name_desc(
+        self,
+        db: Database,
+        /,
+        *,
+        tenant_key: str,
+        search: str,
+        status: str,
+        cursor_id: int,
+        cursor_name: str,
+        limit: int,
     ) -> Sequence[Mapping[str, object]]: ...
 
     async def get_task(
@@ -319,11 +364,69 @@ def _required_string(row: Mapping[str, object], name: str) -> str:
     return value
 
 
+def _cursor_order(query: ListQuery | ExportQuery) -> str:
+    if query.order_by is None:
+        return "id"
+    if query.order_by == "name":
+        return "name-desc" if query.descending else "name-asc"
+    raise ValueError(f"unsupported task order: {query.order_by!r}")
+
+
+def _task_cursor(query: ListQuery, row: Mapping[str, object]) -> str:
+    payload = {
+        "i": _row_id(row),
+        "n": _row_name(row) if query.order_by == "name" else "",
+        "o": _cursor_order(query),
+        "v": 1,
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+    return encoded.rstrip(b"=").decode("ascii")
+
+
+def _task_cursor_values(query: ListQuery) -> tuple[int, str]:
+    if query.cursor is None:
+        return 0, ""
+    padding = b"=" * (-len(query.cursor) % 4)
+    try:
+        decoded = base64.b64decode(
+            query.cursor.encode("ascii") + padding,
+            altchars=b"-_",
+            validate=True,
+        )
+        payload = json.loads(decoded)
+    except (UnicodeEncodeError, UnicodeDecodeError, binascii.Error, json.JSONDecodeError) as error:
+        raise AdminCursorError from error
+    if not isinstance(payload, dict) or set(payload) != {"i", "n", "o", "v"}:
+        raise AdminCursorError
+    cursor_id = payload["i"]
+    cursor_name = payload["n"]
+    if (
+        payload["v"] != 1
+        or payload["o"] != _cursor_order(query)
+        or not isinstance(cursor_id, int)
+        or isinstance(cursor_id, bool)
+        or cursor_id <= 0
+        or not isinstance(cursor_name, str)
+        or len(cursor_name) > 255
+    ):
+        raise AdminCursorError
+    if (query.order_by == "name") != bool(cursor_name):
+        raise AdminCursorError
+    return cursor_id, cursor_name
+
+
 def _optional_string(row: Mapping[str, object], name: str) -> str | None:
     value = row.get(name)
     if value is not None and not isinstance(value, str):
         raise ValueError(f"audit history returned an invalid {name}")
-    return value
+    return value or None
 
 
 class TaskRepository:
@@ -351,16 +454,53 @@ class TaskRepository:
         self._list_scope = list_scope or _unscoped_list
         self._mutation_scope = mutation_scope or _unscoped_list
 
-    async def list(self, query: ListQuery) -> Page:
+    async def list(self, query: ListQuery) -> CursorPage:
+        search = query.search or ""
+        status = query.filters.get("status", "")
+        cursor_id, cursor_name = _task_cursor_values(query)
+        async with self._list_scope():
+            if query.order_by is None:
+                rows = await self._queries.list_tasks_cursor_default(
+                    self._database,
+                    tenant_key=self._tenant_key,
+                    search=search,
+                    status=status,
+                    cursor_id=cursor_id,
+                    limit=query.limit + 1,
+                )
+            elif query.order_by == "name" and query.descending:
+                rows = await self._queries.list_tasks_cursor_name_desc(
+                    self._database,
+                    tenant_key=self._tenant_key,
+                    search=search,
+                    status=status,
+                    cursor_id=cursor_id,
+                    cursor_name=cursor_name,
+                    limit=query.limit + 1,
+                )
+            elif query.order_by == "name":
+                rows = await self._queries.list_tasks_cursor_name_asc(
+                    self._database,
+                    tenant_key=self._tenant_key,
+                    search=search,
+                    status=status,
+                    cursor_id=cursor_id,
+                    cursor_name=cursor_name,
+                    limit=query.limit + 1,
+                )
+            else:
+                raise ValueError(f"unsupported task order: {query.order_by!r}")
+        page_rows = tuple(rows[: query.limit])
+        next_cursor = (
+            _task_cursor(query, page_rows[-1]) if len(rows) > query.limit and page_rows else None
+        )
+        return CursorPage(tuple(_task_record(row) for row in page_rows), next_cursor)
+
+    async def export(self, query: ExportQuery) -> tuple[Record, ...]:
+        """Run one bounded checked-SQL export selected only by allowlisted controls."""
         search = query.search or ""
         status = query.filters.get("status", "")
         async with self._list_scope():
-            total = await self._queries.count_tasks(
-                self._database,
-                tenant_key=self._tenant_key,
-                search=search,
-                status=status,
-            )
             if query.order_by is None:
                 rows = await self._queries.list_tasks_default(
                     self._database,
@@ -368,7 +508,7 @@ class TaskRepository:
                     search=search,
                     status=status,
                     limit=query.limit,
-                    offset=query.offset,
+                    offset=0,
                 )
             elif query.order_by == "name" and query.descending:
                 rows = await self._queries.list_tasks_name_desc(
@@ -377,7 +517,7 @@ class TaskRepository:
                     search=search,
                     status=status,
                     limit=query.limit,
-                    offset=query.offset,
+                    offset=0,
                 )
             elif query.order_by == "name":
                 rows = await self._queries.list_tasks_name_asc(
@@ -386,14 +526,11 @@ class TaskRepository:
                     search=search,
                     status=status,
                     limit=query.limit,
-                    offset=query.offset,
+                    offset=0,
                 )
             else:
                 raise ValueError(f"unsupported task order: {query.order_by!r}")
-        total_value = total.get("total")
-        if not isinstance(total_value, int):
-            raise ValueError("count_tasks returned an invalid total")
-        return Page(tuple(_task_record(row) for row in rows), total_value)
+        return tuple(_task_record(row) for row in rows)
 
     async def get(self, object_id: str) -> Record | None:
         task_id = _integer_id(object_id)
@@ -630,6 +767,17 @@ async def _close_selected(
     return await repository.close(object_ids)
 
 
+async def _export_tasks(
+    context: Context,
+    repository: AdminRepository,
+    query: ExportQuery,
+) -> Sequence[Record]:
+    del context
+    if not isinstance(repository, TaskRepository):
+        raise TypeError("CSV export requires the task repository")
+    return await repository.export(query)
+
+
 def _task_repository(context: Context, resource: AdminResource) -> TaskRepository:
     repository = resource.repository_for(context)
     if not isinstance(repository, TaskRepository):
@@ -739,6 +887,7 @@ def audit_history_reader(
                 "resource:change",
                 "resource:delete",
                 "resource:bulk",
+                "resource:export",
                 "resource:history",
             ):
                 raise ValueError("audit history returned an invalid action")
@@ -834,5 +983,22 @@ def task_resource(
                 max_items=10,
             ),
         ),
-        page_size=10,
+        pagination="cursor",
+        saved_views=(
+            AdminSavedView("open", "Open tasks", filters={"status": "open"}),
+            AdminSavedView(
+                "closed-by-name",
+                "Closed tasks by name",
+                filters={"status": "closed"},
+                order_by="name",
+            ),
+        ),
+        csv_export=AdminCsvExport(
+            ("id", "name", "status", "active", "parent_name"),
+            _export_tasks,
+            filename="tasks.csv",
+            max_rows=1_000,
+            max_bytes=1_048_576,
+        ),
+        page_size=2,
     )

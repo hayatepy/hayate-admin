@@ -44,6 +44,7 @@ _ACTIONS: Mapping[AdminRole, frozenset[AdminAction]] = {
             "resource:add",
             "resource:change",
             "resource:bulk",
+            "resource:export",
             "resource:history",
         }
     ),
@@ -55,6 +56,7 @@ _ACTIONS: Mapping[AdminRole, frozenset[AdminAction]] = {
             "resource:change",
             "resource:delete",
             "resource:bulk",
+            "resource:export",
             "resource:history",
         }
     ),

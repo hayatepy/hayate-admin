@@ -10,9 +10,10 @@ checked SQL rather than ORM or database reflection.
 > **Status: pre-release.** The typed CRUD and security core is implemented.
 > The SQLite/generated-SQL, browser, and native Workers/D1 reference paths are
 > implemented, including explicit searchable relationships and bounded inline
-> editing. General Django admin parity is not claimed; saved views,
-> internationalization, and the breadth of Django's mature extension ecosystem
-> remain outside the current surface.
+> editing, saved views, keyset cursors, and policy-safe CSV export. General
+> Django admin parity is not claimed; internationalization, theming, and the
+> breadth of Django's mature extension ecosystem remain outside the current
+> surface.
 
 `hayate-admin` is an internal management tool for trusted operators. Public,
 process-centric customer workflows should remain purpose-built application
@@ -31,7 +32,8 @@ The UI receives only a bounded `ListQuery`:
 - search text, capped at 200 characters;
 - choice filters declared by the resource;
 - one declared sortable field and direction;
-- offset and a page size capped at 100.
+- either a bounded offset or an opaque, query-bound repository cursor;
+- a page size capped at 100.
 
 It never receives SQL text, column expressions, table names, or generic
 database access.
@@ -123,6 +125,58 @@ site.register(app)
 
 There is deliberately no default authorizer, no anonymous mode, and no
 built-in superuser.
+
+## Saved views, cursor pagination, and CSV
+
+Saved views are static metadata over the same declared search, filter, and sort
+controls. They cannot store SQL, table names, arbitrary parameters, or a
+permission decision:
+
+```python
+from hayate_admin import AdminCsvExport, AdminSavedView, CursorPage, ExportQuery
+
+
+async def export_users(context, repository, query: ExportQuery):
+    # Select one checked statement, bind query values, and obey query.limit.
+    return await repository.export(query)
+
+
+users = AdminResource(
+    # ...explicit fields and repository...
+    pagination="cursor",
+    saved_views=(
+        AdminSavedView(
+            "suspended",
+            "Suspended users",
+            filters={"status": "suspended"},
+            order_by="email",
+        ),
+    ),
+    csv_export=AdminCsvExport(
+        ("id", "email", "status"),
+        export_users,
+        filename="users.csv",
+        max_rows=1_000,
+        max_bytes=1_048_576,
+    ),
+)
+```
+
+A cursor-mode repository returns `CursorPage(items, next_cursor)`. The
+continuation is repository-owned and must encode only a checked keyset, never
+SQL. The site wraps it in an opaque envelope bound to the resource, saved view,
+search, filters, and sort by a canonical SHA-256 fingerprint. Changing any of
+those controls invalidates the cursor without duplicating their values inside
+the token. A repository raises `AdminCursorError` for an unsupported
+continuation, which becomes a generic `400` response without reflecting cursor
+internals.
+
+CSV is a separate `resource:export` capability. Its callback receives an
+`ExportQuery` with a hard `max_rows + 1` limit so the site can reject
+truncation instead of silently producing partial evidence. Every returned
+record is authorized again at object scope. Only configured fields are
+serialized; spreadsheet formula prefixes are neutralized; responses are
+bounded by rows and UTF-8 bytes and are never rendered through htmx.
 
 ## Relationships and inlines
 
@@ -222,13 +276,18 @@ Read [the threat model](docs/SECURITY.md) before deploying.
 - delete confirmation;
 - allowlisted bulk actions with bounded selection, per-object authorization,
   explicit partial results, and operation-tagged audit evidence;
+- named saved views composed from allowlisted controls;
+- opt-in forward keyset pagination with query-bound opaque cursor envelopes;
+- separately authorized, field-allowlisted CSV with per-object checks,
+  spreadsheet-cell protection, and hard row/byte limits;
 - separately authorized, paginated per-object history backed only by redacted
   audit events;
 - full-page and htmx fragment representations;
 - ordinary `303` post/redirect/get and htmx `HX-Redirect`;
 - application-injected authorization and redacted audit events.
 
-Saved views and internationalization remain tracked Phase 2 work.
+Internationalization, theme/branding hooks, and the accessibility audit remain
+tracked Phase 2 work.
 
 ## Executable SQLite reference
 
@@ -236,13 +295,15 @@ The [SQLite example](examples/sqlite/README.md) combines real hayate-auth
 sessions, separately provisioned viewer/editor/operator roles, generated
 hayate-sql list/count/get/create/update/delete/bulk-close functions, persistent
 redacted audit rows, explicit same-tenant task relationships, bounded subtasks,
-and a Chromium CRUD/search/filter/sort/bulk/relationship/inline gate. It is the
-complete minimal integration for the initial package contract.
+saved views, keyset list queries, policy-safe CSV, and a Chromium
+CRUD/search/filter/sort/bulk/relationship/inline/export gate. It is the complete
+minimal integration for the current package contract.
 
 The [Workers/D1 gate](examples/workers_d1/README.md) packages the exact same
 resource and generated query facade into workerd. It exercises the full
 authorization, mutation, CRUD, bulk, relationship, inline, object-history,
-escaping, audit, page, and fragment contract without ASGI.
+saved-view, cursor, CSV, escaping, audit, page, and fragment contract without
+ASGI.
 
 ## Development
 

@@ -4,6 +4,22 @@ All notable changes to hayate-admin are documented here.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-28
+
+### Added
+
+- Add static saved views composed only from declared search, filter, and sort
+  controls.
+- Add opt-in forward keyset pagination with query-bound opaque cursor envelopes
+  and repository-owned continuations.
+- Add separately authorized CSV exports with explicit callbacks and field
+  allowlists, per-object authorization, formula-safe cells, row/byte limits,
+  download hardening, and redacted audit evidence.
+- Exercise saved views, cursor traversal, and CSV download with the same
+  checked SQL on SQLite, Chromium, and native Workers/D1.
+
+## [0.1.0] - 2026-07-27
+
 ### Added
 
 - Add fail-closed typed resource, field, repository, authorization, and audit

@@ -117,7 +117,7 @@ cp "${repo_dir}/examples/workers_d1/wrangler.toml" "${test_dir}/wrangler.toml"
 cp "${repo_dir}/examples/workers_d1/package.json" "${test_dir}/package.json"
 sed \
   -e "s|\"hayate==0.13.0\"|\"hayate @ file://${hayate_wheel}\"|" \
-  -e "s|\"hayate-admin==0.1.0\"|\"hayate-admin @ file://${admin_wheel}\"|" \
+  -e "s|\"hayate-admin==0.2.0\"|\"hayate-admin @ file://${admin_wheel}\"|" \
   -e "s|\"hayate-htmx==0.2.0\"|\"hayate-htmx @ file://${htmx_wheel}\"|" \
   -e "s|\"hayate-sql==0.1.1\"|\"hayate-sql @ file://${sql_wheel}\"|" \
   "${repo_dir}/examples/workers_d1/pyproject.toml" >"${test_dir}/pyproject.toml"
@@ -398,6 +398,70 @@ grep -Fq "Updated D1 task" "${body_file}"
 status="$(
   curl --silent --output "${body_file}" --write-out '%{http_code}' \
     -H 'Authorization: Bearer operator' \
+    "${origin}/admin/tasks?sort=name&direction=asc"
+)"
+test "${status}" = "200"
+next_path="$(
+  python - "${body_file}" <<'PY'
+import html
+import re
+import sys
+from pathlib import Path
+
+body = html.unescape(Path(sys.argv[1]).read_text())
+match = re.search(r'href="([^"]+\?[^"]*cursor=[^"]+)"[^>]*>Next</a>', body)
+assert match is not None, body
+print(match.group(1))
+PY
+)"
+status="$(
+  curl --silent --output "${body_file}" --write-out '%{http_code}' \
+    -H 'Authorization: Bearer operator' \
+    "${origin}${next_path}"
+)"
+test "${status}" = "200"
+grep -Fq "Updated D1 task" "${body_file}"
+grep -Fq ">First</a>" "${body_file}"
+
+status="$(
+  curl --silent --output "${body_file}" --write-out '%{http_code}' \
+    -H 'Authorization: Bearer operator' \
+    "${origin}/admin/tasks?view=closed-by-name"
+)"
+test "${status}" = "200"
+grep -Fq "Alpha task" "${body_file}"
+grep -Fq "Updated D1 task" "${body_file}"
+grep -Fq 'aria-current="page"' "${body_file}"
+
+status="$(
+  curl --silent --output "${body_file}" --write-out '%{http_code}' \
+    -H 'Authorization: Bearer viewer' \
+    "${origin}/admin/tasks/export.csv"
+)"
+test "${status}" = "403"
+
+status="$(
+  curl --silent --dump-header "${headers_file}" --output "${body_file}" \
+    --write-out '%{http_code}' \
+    -H 'Authorization: Bearer operator' \
+    "${origin}/admin/tasks/export.csv?sort=name&direction=asc"
+)"
+test "${status}" = "200"
+grep -Eiq '^content-type: text/csv; charset=utf-8' "${headers_file}"
+grep -Eiq '^content-disposition: attachment; filename="tasks.csv"' "${headers_file}"
+grep -Fq "ID,Name,Status,Active,Parent task" "${body_file}"
+grep -Fq "Updated D1 task" "${body_file}"
+grep -Fq "Relationship child" "${body_file}"
+if grep -Fq "Beta tenant task" "${body_file}" \
+  || grep -Fq "update-bound-secret" "${body_file}" \
+  || grep -Fq "relationship-child-secret" "${body_file}"; then
+  echo "cross-tenant or non-export field reached D1 CSV" >&2
+  exit 1
+fi
+
+status="$(
+  curl --silent --output "${body_file}" --write-out '%{http_code}' \
+    -H 'Authorization: Bearer operator' \
     "${origin}/admin/tasks/object/1/inline/subtasks"
 )"
 test "${status}" = "200"
@@ -522,13 +586,14 @@ import sys
 from pathlib import Path
 
 events = json.loads(Path(sys.argv[1]).read_text())
-assert len(events) == 31, events
-assert [event["phase"] for event in events].count("success") == 11
+assert len(events) == 34, events
+assert [event["phase"] for event in events].count("success") == 12
 assert any(event["error_type"] == "CrossSiteRequest" for event in events)
 assert any(event["error_type"] == "AuthorizationDenied" for event in events)
 assert any(event["error_type"] == "ValidationError" for event in events)
 assert any(event["error_type"] == "InvalidInlineForm" for event in events)
 assert sum(event["operation"] == "close" for event in events) == 4
+assert sum(event["action"] == "resource:export" for event in events) == 3
 assert any(
     event["operation"] == "close"
     and event["object_id"] == "missing"
@@ -566,7 +631,7 @@ for event in events:
     }
 print(
     "workerd D1 admin: authorization origin validation escaping CRUD bulk "
-    "relationships inlines htmx audit"
+    "relationships inlines saved-views cursor CSV htmx audit"
 )
 PY
 

@@ -21,6 +21,12 @@ Relationship create/update also repeat the same-tenant parent condition in
 their write statement, backed by a composite `(tenant_key, parent_id)` foreign
 key.
 
+The list uses forward composite-key cursors selected from three checked
+statements: ID order, name ascending, and name descending. Saved views are
+static combinations of the declared status filter and name sort. CSV uses a
+separate callback over the offset statements, exports only ID/name/status/
+active/parent label, and deliberately omits notes.
+
 ## Compile the contracts
 
 From the repository root:
@@ -68,7 +74,7 @@ Roles are deliberately not self-asserted:
 
 - `viewer` can view the site and resources;
 - `editor` can also add, change, run the declared close bulk action, and view
-  redacted object history;
+  redacted object history and export the allowlisted CSV fields;
 - `operator` can also delete records.
 
 The public auth API cannot write `admin_role`. Provision roles through a
@@ -85,8 +91,8 @@ SQL, cookie, or token column.
 The real-browser gate signs in through hayate-auth, creates records, searches
 and selects an authorized parent, follows the preloaded relationship, deletes
 a child through the inline editor, bulk-closes, searches, filters, sorts,
-edits, views redacted object history, deletes, checks browser errors, and
-verifies the audit rows:
+traverses a cursor, opens a saved view, downloads CSV, edits, views redacted
+object history, deletes, checks browser errors, and verifies the audit rows:
 
 ```sh
 uv run playwright install chromium

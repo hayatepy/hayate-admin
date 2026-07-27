@@ -26,7 +26,7 @@ def main() -> int:
         metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
         metadata = email.message_from_bytes(wheel.read(metadata_name))
         assert metadata["Name"] == "hayate-admin"
-        assert metadata["Version"] == "0.1.0"
+        assert metadata["Version"] == "0.2.0"
         requirements = metadata.get_all("Requires-Dist")
         assert requirements is not None
         assert any(requirement.startswith("hayate>=0.13") for requirement in requirements)

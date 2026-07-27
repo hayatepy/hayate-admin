@@ -774,6 +774,230 @@ async def list_task_relationship_choices(
     )
 
 
+class ListTasksCursorDefaultRow(TypedDict):
+    id: int
+    name: str
+    status: str
+    active: int
+    notes: str
+    parent_id: int | None
+    parent_name: str | None
+
+
+LIST_TASKS_CURSOR_DEFAULT_QUERY = Query(
+    name="list_tasks_cursor_default",
+    sql=(
+        "SELECT child.id, child.name, child.status, child.active, child.notes,\n"
+        "       child.parent_id, parent.name AS parent_name\n"
+        "FROM task AS child\n"
+        "LEFT JOIN task AS parent\n"
+        "  ON parent.id = child.parent_id\n"
+        " AND parent.tenant_key = child.tenant_key\n"
+        "WHERE child.tenant_key = ?1\n"
+        "  AND (?2 = '' OR instr(lower(child.name), lower(?2)) > 0)\n"
+        "  AND (?3 = '' OR child.status = ?3)\n"
+        "  AND child.id > ?4\n"
+        "ORDER BY child.id\n"
+        "LIMIT ?5"
+    ),
+    cardinality=Cardinality.MANY,
+    parameters=(
+        Parameter("tenant_key", "str"),
+        Parameter("search", "str"),
+        Parameter("status", "str"),
+        Parameter("cursor_id", "int"),
+        Parameter("limit", "int"),
+    ),
+    columns=(
+        Column("id", "int"),
+        Column("name", "str"),
+        Column("status", "str"),
+        Column("active", "int"),
+        Column("notes", "str"),
+        Column("parent_id", "int?"),
+        Column("parent_name", "str?"),
+    ),
+    timeout_ms=None,
+)
+
+
+async def list_tasks_cursor_default(
+    db: Database,
+    /,
+    *,
+    tenant_key: str,
+    search: str,
+    status: str,
+    cursor_id: int,
+    limit: int,
+) -> list[ListTasksCursorDefaultRow]:
+    return cast(
+        "list[ListTasksCursorDefaultRow]",
+        await db.run(
+            LIST_TASKS_CURSOR_DEFAULT_QUERY,
+            tenant_key=tenant_key,
+            search=search,
+            status=status,
+            cursor_id=cursor_id,
+            limit=limit,
+        ),
+    )
+
+
+class ListTasksCursorNameAscRow(TypedDict):
+    id: int
+    name: str
+    status: str
+    active: int
+    notes: str
+    parent_id: int | None
+    parent_name: str | None
+
+
+LIST_TASKS_CURSOR_NAME_ASC_QUERY = Query(
+    name="list_tasks_cursor_name_asc",
+    sql=(
+        "SELECT child.id, child.name, child.status, child.active, child.notes,\n"
+        "       child.parent_id, parent.name AS parent_name\n"
+        "FROM task AS child\n"
+        "LEFT JOIN task AS parent\n"
+        "  ON parent.id = child.parent_id\n"
+        " AND parent.tenant_key = child.tenant_key\n"
+        "WHERE child.tenant_key = ?1\n"
+        "  AND (?2 = '' OR instr(lower(child.name), lower(?2)) > 0)\n"
+        "  AND (?3 = '' OR child.status = ?3)\n"
+        "  AND (\n"
+        "    ?4 = 0\n"
+        "    OR child.name > ?5\n"
+        "    OR (child.name = ?5 AND child.id > ?4)\n"
+        "  )\n"
+        "ORDER BY child.name, child.id\n"
+        "LIMIT ?6"
+    ),
+    cardinality=Cardinality.MANY,
+    parameters=(
+        Parameter("tenant_key", "str"),
+        Parameter("search", "str"),
+        Parameter("status", "str"),
+        Parameter("cursor_id", "int"),
+        Parameter("cursor_name", "str"),
+        Parameter("limit", "int"),
+    ),
+    columns=(
+        Column("id", "int"),
+        Column("name", "str"),
+        Column("status", "str"),
+        Column("active", "int"),
+        Column("notes", "str"),
+        Column("parent_id", "int?"),
+        Column("parent_name", "str?"),
+    ),
+    timeout_ms=None,
+)
+
+
+async def list_tasks_cursor_name_asc(
+    db: Database,
+    /,
+    *,
+    tenant_key: str,
+    search: str,
+    status: str,
+    cursor_id: int,
+    cursor_name: str,
+    limit: int,
+) -> list[ListTasksCursorNameAscRow]:
+    return cast(
+        "list[ListTasksCursorNameAscRow]",
+        await db.run(
+            LIST_TASKS_CURSOR_NAME_ASC_QUERY,
+            tenant_key=tenant_key,
+            search=search,
+            status=status,
+            cursor_id=cursor_id,
+            cursor_name=cursor_name,
+            limit=limit,
+        ),
+    )
+
+
+class ListTasksCursorNameDescRow(TypedDict):
+    id: int
+    name: str
+    status: str
+    active: int
+    notes: str
+    parent_id: int | None
+    parent_name: str | None
+
+
+LIST_TASKS_CURSOR_NAME_DESC_QUERY = Query(
+    name="list_tasks_cursor_name_desc",
+    sql=(
+        "SELECT child.id, child.name, child.status, child.active, child.notes,\n"
+        "       child.parent_id, parent.name AS parent_name\n"
+        "FROM task AS child\n"
+        "LEFT JOIN task AS parent\n"
+        "  ON parent.id = child.parent_id\n"
+        " AND parent.tenant_key = child.tenant_key\n"
+        "WHERE child.tenant_key = ?1\n"
+        "  AND (?2 = '' OR instr(lower(child.name), lower(?2)) > 0)\n"
+        "  AND (?3 = '' OR child.status = ?3)\n"
+        "  AND (\n"
+        "    ?4 = 0\n"
+        "    OR child.name < ?5\n"
+        "    OR (child.name = ?5 AND child.id < ?4)\n"
+        "  )\n"
+        "ORDER BY child.name DESC, child.id DESC\n"
+        "LIMIT ?6"
+    ),
+    cardinality=Cardinality.MANY,
+    parameters=(
+        Parameter("tenant_key", "str"),
+        Parameter("search", "str"),
+        Parameter("status", "str"),
+        Parameter("cursor_id", "int"),
+        Parameter("cursor_name", "str"),
+        Parameter("limit", "int"),
+    ),
+    columns=(
+        Column("id", "int"),
+        Column("name", "str"),
+        Column("status", "str"),
+        Column("active", "int"),
+        Column("notes", "str"),
+        Column("parent_id", "int?"),
+        Column("parent_name", "str?"),
+    ),
+    timeout_ms=None,
+)
+
+
+async def list_tasks_cursor_name_desc(
+    db: Database,
+    /,
+    *,
+    tenant_key: str,
+    search: str,
+    status: str,
+    cursor_id: int,
+    cursor_name: str,
+    limit: int,
+) -> list[ListTasksCursorNameDescRow]:
+    return cast(
+        "list[ListTasksCursorNameDescRow]",
+        await db.run(
+            LIST_TASKS_CURSOR_NAME_DESC_QUERY,
+            tenant_key=tenant_key,
+            search=search,
+            status=status,
+            cursor_id=cursor_id,
+            cursor_name=cursor_name,
+            limit=limit,
+        ),
+    )
+
+
 class ListTasksDefaultRow(TypedDict):
     id: int
     name: str
@@ -1164,6 +1388,9 @@ __all__ = [
     "LIST_ADMIN_AUDIT_EVENTS_FOR_OBJECT_QUERY",
     "LIST_ADMIN_AUDIT_EVENTS_QUERY",
     "LIST_SUBTASKS_QUERY",
+    "LIST_TASKS_CURSOR_DEFAULT_QUERY",
+    "LIST_TASKS_CURSOR_NAME_ASC_QUERY",
+    "LIST_TASKS_CURSOR_NAME_DESC_QUERY",
     "LIST_TASKS_DEFAULT_QUERY",
     "LIST_TASKS_NAME_ASC_QUERY",
     "LIST_TASKS_NAME_DESC_QUERY",
@@ -1186,6 +1413,9 @@ __all__ = [
     "ListAdminAuditEventsRow",
     "ListSubtasksRow",
     "ListTaskRelationshipChoicesRow",
+    "ListTasksCursorDefaultRow",
+    "ListTasksCursorNameAscRow",
+    "ListTasksCursorNameDescRow",
     "ListTasksDefaultRow",
     "ListTasksNameAscRow",
     "ListTasksNameDescRow",
@@ -1207,6 +1437,9 @@ __all__ = [
     "list_admin_audit_events_for_object",
     "list_subtasks",
     "list_task_relationship_choices",
+    "list_tasks_cursor_default",
+    "list_tasks_cursor_name_asc",
+    "list_tasks_cursor_name_desc",
     "list_tasks_default",
     "list_tasks_name_asc",
     "list_tasks_name_desc",
