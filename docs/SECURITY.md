@@ -49,13 +49,31 @@ fail closed. Repeated `selected` values are accepted only by the bulk route.
 
 ## Output and browser policy
 
-Record values, labels, validation messages, actor display names, URLs, and
-attributes are HTML-escaped. The built-in response policy is `no-store`, uses
-`frame-ancestors 'none'`, denies external content by default, permits
-same-origin form actions and htmx connections, and sets `nosniff`.
+Record values, labels, translated validation messages, branding wordmarks,
+actor display names, URLs, and attributes are HTML-escaped. The built-in
+response policy is `no-store`, uses `frame-ancestors 'none'`, denies external
+content by default, permits same-origin form actions and htmx connections, and
+sets `nosniff`.
 
 An optional htmx asset must be a same-origin absolute path with an SRI
 sha256/384/512 value. The application owns serving and updating that asset.
+
+`AdminMessages` is immutable and scoped to one site. Overrides may select only
+known keys, must preserve simple named placeholders, and cannot use attribute
+or item access, conversions, format specifications, or control characters.
+Messages are still escaped at their final HTML context. Application validator
+messages are treated as untrusted text too.
+
+`AdminBranding` accepts only an escaped plain-text wordmark. `AdminTheme`
+accepts six-digit hex color tokens and one of two fixed density values, then
+enforces minimum contrast before rendering. The package never accepts raw
+HTML, scripts, event handlers, arbitrary attributes, CSS declarations, or
+remote stylesheet URLs. Its deterministic built-in stylesheet is allowed by
+an exact SHA-256 `style-src` hash; the policy does not add `unsafe-inline`.
+
+Applications needing arbitrary visual components should build a separate
+purpose-specific Hayate view with its own security review instead of widening
+the privileged admin renderer's extension boundary.
 
 ## Repository boundary
 

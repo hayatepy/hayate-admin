@@ -8,13 +8,16 @@ import pytest
 from hayate_admin import (
     Actor,
     AdminAsset,
+    AdminBranding,
     AdminBulkAction,
     AdminCsvExport,
     AdminField,
     AdminInline,
+    AdminMessages,
     AdminRelationship,
     AdminResource,
     AdminSavedView,
+    AdminTheme,
     AdminValidationError,
     AuditEvent,
     AuditHistoryPage,
@@ -101,6 +104,51 @@ def test_field_parser_is_bounded_and_typed(field, raw, expected, error):
         assert message is None
     else:
         assert message is not None and error in message
+
+
+def test_messages_are_immutable_scoped_and_placeholder_safe():
+    messages = AdminMessages(
+        locale="ja-JP",
+        overrides={
+            "list.search": "検索",
+            "form.create_heading": "{item}を追加",
+            "validation.required": "必須項目です。",
+        },
+    )
+    assert messages.text("list.search") == "検索"
+    assert messages.text("form.create_heading", item="タスク") == "タスクを追加"
+    assert messages.text("list.apply") == "Apply"
+    assert AdminField("name", "名前").parse(None, messages=messages) == (
+        None,
+        "必須項目です。",
+    )
+
+    with pytest.raises(TypeError):
+        messages.overrides["list.search"] = "変更"  # type: ignore[index]
+    with pytest.raises(ValueError, match="language tag"):
+        AdminMessages(locale='ja"><script>')
+    with pytest.raises(ValueError, match="unknown admin message key"):
+        AdminMessages(overrides={"unknown": "No"})
+    with pytest.raises(ValueError, match="preserve its named placeholders"):
+        AdminMessages(overrides={"form.create_heading": "追加"})
+    with pytest.raises(ValueError, match="simple named placeholders"):
+        AdminMessages(overrides={"form.create_heading": "{item.__class__}"})
+
+
+def test_branding_accepts_only_contrast_checked_tokens_and_plain_text():
+    branding = AdminBranding(
+        wordmark="Hayate 運用",
+        theme=AdminTheme(accent="#005ea8", density="compact"),
+    )
+    assert branding.theme.accent == "#005EA8"
+    assert branding.theme.on_accent == "#FFFFFF"
+
+    with pytest.raises(ValueError, match="hex color"):
+        AdminTheme(accent="red;}</style><script>")
+    with pytest.raises(ValueError, match="contrast"):
+        AdminTheme(accent="#EEEEEE")
+    with pytest.raises(ValueError, match="wordmark"):
+        AdminBranding(wordmark="unsafe\nmark")
 
 
 def test_resource_rejects_unsafe_or_ambiguous_configuration():
