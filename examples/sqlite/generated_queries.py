@@ -18,9 +18,12 @@ class CloseTaskRow(TypedDict):
 
 CLOSE_TASK_QUERY = Query(
     name="close_task",
-    sql=("UPDATE task\nSET status = 'closed'\nWHERE id = ?1\nRETURNING id"),
+    sql=("UPDATE task\nSET status = 'closed'\nWHERE tenant_key = ?1\n  AND id = ?2\nRETURNING id"),
     cardinality=Cardinality.MAYBE_ONE,
-    parameters=(Parameter("id", "int"),),
+    parameters=(
+        Parameter("tenant_key", "str"),
+        Parameter("id", "int"),
+    ),
     columns=(Column("id", "int"),),
     timeout_ms=None,
 )
@@ -30,12 +33,14 @@ async def close_task(
     db: Database,
     /,
     *,
+    tenant_key: str,
     id: int,
 ) -> CloseTaskRow | None:
     return cast(
         "CloseTaskRow | None",
         await db.run(
             CLOSE_TASK_QUERY,
+            tenant_key=tenant_key,
             id=id,
         ),
     )
@@ -80,6 +85,49 @@ async def count_admin_audit_events_for_object(
     )
 
 
+class CountTaskRelationshipChoicesRow(TypedDict):
+    total: int
+
+
+COUNT_TASK_RELATIONSHIP_CHOICES_QUERY = Query(
+    name="count_task_relationship_choices",
+    sql=(
+        "SELECT count(*) AS total\n"
+        "FROM task\n"
+        "WHERE tenant_key = ?1\n"
+        "  AND (?2 = '' OR instr(lower(name), lower(?2)) > 0)\n"
+        "  AND (?3 IS NULL OR id <> ?3)"
+    ),
+    cardinality=Cardinality.ONE,
+    parameters=(
+        Parameter("tenant_key", "str"),
+        Parameter("search", "str"),
+        Parameter("exclude_id", "int?"),
+    ),
+    columns=(Column("total", "int"),),
+    timeout_ms=None,
+)
+
+
+async def count_task_relationship_choices(
+    db: Database,
+    /,
+    *,
+    tenant_key: str,
+    search: str,
+    exclude_id: int | None,
+) -> CountTaskRelationshipChoicesRow:
+    return cast(
+        "CountTaskRelationshipChoicesRow",
+        await db.run(
+            COUNT_TASK_RELATIONSHIP_CHOICES_QUERY,
+            tenant_key=tenant_key,
+            search=search,
+            exclude_id=exclude_id,
+        ),
+    )
+
+
 class CountTasksRow(TypedDict):
     total: int
 
@@ -89,11 +137,13 @@ COUNT_TASKS_QUERY = Query(
     sql=(
         "SELECT count(*) AS total\n"
         "FROM task\n"
-        "WHERE (?1 = '' OR instr(lower(name), lower(?1)) > 0)\n"
-        "  AND (?2 = '' OR status = ?2)"
+        "WHERE tenant_key = ?1\n"
+        "  AND (?2 = '' OR instr(lower(name), lower(?2)) > 0)\n"
+        "  AND (?3 = '' OR status = ?3)"
     ),
     cardinality=Cardinality.ONE,
     parameters=(
+        Parameter("tenant_key", "str"),
         Parameter("search", "str"),
         Parameter("status", "str"),
     ),
@@ -106,6 +156,7 @@ async def count_tasks(
     db: Database,
     /,
     *,
+    tenant_key: str,
     search: str,
     status: str,
 ) -> CountTasksRow:
@@ -113,6 +164,7 @@ async def count_tasks(
         "CountTasksRow",
         await db.run(
             COUNT_TASKS_QUERY,
+            tenant_key=tenant_key,
             search=search,
             status=status,
         ),
@@ -179,35 +231,85 @@ async def create_admin_audit_event(
     )
 
 
-class CreateTaskRow(TypedDict):
+class CreateSubtaskRow(TypedDict):
     id: int
-    name: str
-    status: str
-    active: int
-    notes: str
 
 
-CREATE_TASK_QUERY = Query(
-    name="create_task",
+CREATE_SUBTASK_QUERY = Query(
+    name="create_subtask",
     sql=(
-        "INSERT INTO task (name, status, active, notes)\n"
-        "VALUES (?1, ?2, ?3, ?4)\n"
-        "RETURNING id, name, status, active, notes"
+        "INSERT INTO task (tenant_key, name, status, active, notes, parent_id)\n"
+        "SELECT ?1, ?3, ?4, ?5, ?6, parent.id\n"
+        "FROM task AS parent\n"
+        "WHERE parent.tenant_key = ?1\n"
+        "  AND parent.id = ?2\n"
+        "RETURNING id"
     ),
-    cardinality=Cardinality.ONE,
+    cardinality=Cardinality.MAYBE_ONE,
     parameters=(
+        Parameter("tenant_key", "str"),
+        Parameter("parent_id", "int"),
         Parameter("name", "str"),
         Parameter("status", "str"),
         Parameter("active", "bool"),
         Parameter("notes", "str"),
     ),
-    columns=(
-        Column("id", "int"),
-        Column("name", "str"),
-        Column("status", "str"),
-        Column("active", "int"),
-        Column("notes", "str"),
+    columns=(Column("id", "int"),),
+    timeout_ms=None,
+)
+
+
+async def create_subtask(
+    db: Database,
+    /,
+    *,
+    tenant_key: str,
+    parent_id: int,
+    name: str,
+    status: str,
+    active: bool,
+    notes: str,
+) -> CreateSubtaskRow | None:
+    return cast(
+        "CreateSubtaskRow | None",
+        await db.run(
+            CREATE_SUBTASK_QUERY,
+            tenant_key=tenant_key,
+            parent_id=parent_id,
+            name=name,
+            status=status,
+            active=active,
+            notes=notes,
+        ),
+    )
+
+
+class CreateTaskRow(TypedDict):
+    id: int
+
+
+CREATE_TASK_QUERY = Query(
+    name="create_task",
+    sql=(
+        "INSERT INTO task (tenant_key, name, status, active, notes, parent_id)\n"
+        "SELECT ?1, ?2, ?3, ?4, ?5, parent.id\n"
+        "FROM (SELECT 1) AS one\n"
+        "LEFT JOIN task AS parent\n"
+        "  ON parent.tenant_key = ?1\n"
+        " AND parent.id = ?6\n"
+        "WHERE ?6 IS NULL OR parent.id IS NOT NULL\n"
+        "RETURNING id"
     ),
+    cardinality=Cardinality.MAYBE_ONE,
+    parameters=(
+        Parameter("tenant_key", "str"),
+        Parameter("name", "str"),
+        Parameter("status", "str"),
+        Parameter("active", "bool"),
+        Parameter("notes", "str"),
+        Parameter("parent_id", "int?"),
+    ),
+    columns=(Column("id", "int"),),
     timeout_ms=None,
 )
 
@@ -216,19 +318,62 @@ async def create_task(
     db: Database,
     /,
     *,
+    tenant_key: str,
     name: str,
     status: str,
     active: bool,
     notes: str,
-) -> CreateTaskRow:
+    parent_id: int | None,
+) -> CreateTaskRow | None:
     return cast(
-        "CreateTaskRow",
+        "CreateTaskRow | None",
         await db.run(
             CREATE_TASK_QUERY,
+            tenant_key=tenant_key,
             name=name,
             status=status,
             active=active,
             notes=notes,
+            parent_id=parent_id,
+        ),
+    )
+
+
+class DeleteSubtaskRow(TypedDict):
+    id: int
+
+
+DELETE_SUBTASK_QUERY = Query(
+    name="delete_subtask",
+    sql=(
+        "DELETE FROM task\nWHERE tenant_key = ?1\n  AND parent_id = ?2\n  AND id = ?3\nRETURNING id"
+    ),
+    cardinality=Cardinality.MAYBE_ONE,
+    parameters=(
+        Parameter("tenant_key", "str"),
+        Parameter("parent_id", "int"),
+        Parameter("id", "int"),
+    ),
+    columns=(Column("id", "int"),),
+    timeout_ms=None,
+)
+
+
+async def delete_subtask(
+    db: Database,
+    /,
+    *,
+    tenant_key: str,
+    parent_id: int,
+    id: int,
+) -> DeleteSubtaskRow | None:
+    return cast(
+        "DeleteSubtaskRow | None",
+        await db.run(
+            DELETE_SUBTASK_QUERY,
+            tenant_key=tenant_key,
+            parent_id=parent_id,
+            id=id,
         ),
     )
 
@@ -239,9 +384,12 @@ class DeleteTaskRow(TypedDict):
 
 DELETE_TASK_QUERY = Query(
     name="delete_task",
-    sql=("DELETE FROM task\nWHERE id = ?1\nRETURNING id"),
+    sql=("DELETE FROM task\nWHERE tenant_key = ?1\n  AND id = ?2\nRETURNING id"),
     cardinality=Cardinality.MAYBE_ONE,
-    parameters=(Parameter("id", "int"),),
+    parameters=(
+        Parameter("tenant_key", "str"),
+        Parameter("id", "int"),
+    ),
     columns=(Column("id", "int"),),
     timeout_ms=None,
 )
@@ -251,12 +399,14 @@ async def delete_task(
     db: Database,
     /,
     *,
+    tenant_key: str,
     id: int,
 ) -> DeleteTaskRow | None:
     return cast(
         "DeleteTaskRow | None",
         await db.run(
             DELETE_TASK_QUERY,
+            tenant_key=tenant_key,
             id=id,
         ),
     )
@@ -264,14 +414,18 @@ async def delete_task(
 
 class GetAdminRoleRow(TypedDict):
     role: str
+    tenant_key: str
 
 
 GET_ADMIN_ROLE_QUERY = Query(
     name="get_admin_role",
-    sql=("SELECT role\nFROM admin_role\nWHERE user_id = ?1"),
+    sql=("SELECT role, tenant_key\nFROM admin_role\nWHERE user_id = ?1"),
     cardinality=Cardinality.MAYBE_ONE,
     parameters=(Parameter("user_id", "str"),),
-    columns=(Column("role", "str"),),
+    columns=(
+        Column("role", "str"),
+        Column("tenant_key", "str"),
+    ),
     timeout_ms=None,
 )
 
@@ -297,19 +451,35 @@ class GetTaskRow(TypedDict):
     status: str
     active: int
     notes: str
+    parent_id: int | None
+    parent_name: str | None
 
 
 GET_TASK_QUERY = Query(
     name="get_task",
-    sql=("SELECT id, name, status, active, notes\nFROM task\nWHERE id = ?1"),
+    sql=(
+        "SELECT child.id, child.name, child.status, child.active, child.notes,\n"
+        "       child.parent_id, parent.name AS parent_name\n"
+        "FROM task AS child\n"
+        "LEFT JOIN task AS parent\n"
+        "  ON parent.id = child.parent_id\n"
+        " AND parent.tenant_key = child.tenant_key\n"
+        "WHERE child.tenant_key = ?1\n"
+        "  AND child.id = ?2"
+    ),
     cardinality=Cardinality.MAYBE_ONE,
-    parameters=(Parameter("id", "int"),),
+    parameters=(
+        Parameter("tenant_key", "str"),
+        Parameter("id", "int"),
+    ),
     columns=(
         Column("id", "int"),
         Column("name", "str"),
         Column("status", "str"),
         Column("active", "int"),
         Column("notes", "str"),
+        Column("parent_id", "int?"),
+        Column("parent_name", "str?"),
     ),
     timeout_ms=None,
 )
@@ -319,13 +489,62 @@ async def get_task(
     db: Database,
     /,
     *,
+    tenant_key: str,
     id: int,
 ) -> GetTaskRow | None:
     return cast(
         "GetTaskRow | None",
         await db.run(
             GET_TASK_QUERY,
+            tenant_key=tenant_key,
             id=id,
+        ),
+    )
+
+
+class GetTaskRelationshipChoiceRow(TypedDict):
+    id: int
+    name: str
+
+
+GET_TASK_RELATIONSHIP_CHOICE_QUERY = Query(
+    name="get_task_relationship_choice",
+    sql=(
+        "SELECT id, name\n"
+        "FROM task\n"
+        "WHERE tenant_key = ?1\n"
+        "  AND id = ?2\n"
+        "  AND (?3 IS NULL OR id <> ?3)"
+    ),
+    cardinality=Cardinality.MAYBE_ONE,
+    parameters=(
+        Parameter("tenant_key", "str"),
+        Parameter("id", "int"),
+        Parameter("exclude_id", "int?"),
+    ),
+    columns=(
+        Column("id", "int"),
+        Column("name", "str"),
+    ),
+    timeout_ms=None,
+)
+
+
+async def get_task_relationship_choice(
+    db: Database,
+    /,
+    *,
+    tenant_key: str,
+    id: int,
+    exclude_id: int | None,
+) -> GetTaskRelationshipChoiceRow | None:
+    return cast(
+        "GetTaskRelationshipChoiceRow | None",
+        await db.run(
+            GET_TASK_RELATIONSHIP_CHOICE_QUERY,
+            tenant_key=tenant_key,
+            id=id,
+            exclude_id=exclude_id,
         ),
     )
 
@@ -438,26 +657,151 @@ async def list_admin_audit_events_for_object(
     )
 
 
+class ListSubtasksRow(TypedDict):
+    id: int
+    name: str
+    status: str
+    active: int
+    notes: str
+    parent_id: int | None
+    parent_name: str | None
+
+
+LIST_SUBTASKS_QUERY = Query(
+    name="list_subtasks",
+    sql=(
+        "SELECT child.id, child.name, child.status, child.active, child.notes,\n"
+        "       child.parent_id, parent.name AS parent_name\n"
+        "FROM task AS child\n"
+        "JOIN task AS parent\n"
+        "  ON parent.id = child.parent_id\n"
+        " AND parent.tenant_key = child.tenant_key\n"
+        "WHERE child.tenant_key = ?1\n"
+        "  AND child.parent_id = ?2\n"
+        "ORDER BY child.id\n"
+        "LIMIT ?3"
+    ),
+    cardinality=Cardinality.MANY,
+    parameters=(
+        Parameter("tenant_key", "str"),
+        Parameter("parent_id", "int"),
+        Parameter("limit", "int"),
+    ),
+    columns=(
+        Column("id", "int"),
+        Column("name", "str"),
+        Column("status", "str"),
+        Column("active", "int"),
+        Column("notes", "str"),
+        Column("parent_id", "int?"),
+        Column("parent_name", "str?"),
+    ),
+    timeout_ms=None,
+)
+
+
+async def list_subtasks(
+    db: Database,
+    /,
+    *,
+    tenant_key: str,
+    parent_id: int,
+    limit: int,
+) -> list[ListSubtasksRow]:
+    return cast(
+        "list[ListSubtasksRow]",
+        await db.run(
+            LIST_SUBTASKS_QUERY,
+            tenant_key=tenant_key,
+            parent_id=parent_id,
+            limit=limit,
+        ),
+    )
+
+
+class ListTaskRelationshipChoicesRow(TypedDict):
+    id: int
+    name: str
+
+
+LIST_TASK_RELATIONSHIP_CHOICES_QUERY = Query(
+    name="list_task_relationship_choices",
+    sql=(
+        "SELECT id, name\n"
+        "FROM task\n"
+        "WHERE tenant_key = ?1\n"
+        "  AND (?2 = '' OR instr(lower(name), lower(?2)) > 0)\n"
+        "  AND (?3 IS NULL OR id <> ?3)\n"
+        "ORDER BY name, id\n"
+        "LIMIT ?4 OFFSET ?5"
+    ),
+    cardinality=Cardinality.MANY,
+    parameters=(
+        Parameter("tenant_key", "str"),
+        Parameter("search", "str"),
+        Parameter("exclude_id", "int?"),
+        Parameter("limit", "int"),
+        Parameter("offset", "int"),
+    ),
+    columns=(
+        Column("id", "int"),
+        Column("name", "str"),
+    ),
+    timeout_ms=None,
+)
+
+
+async def list_task_relationship_choices(
+    db: Database,
+    /,
+    *,
+    tenant_key: str,
+    search: str,
+    exclude_id: int | None,
+    limit: int,
+    offset: int,
+) -> list[ListTaskRelationshipChoicesRow]:
+    return cast(
+        "list[ListTaskRelationshipChoicesRow]",
+        await db.run(
+            LIST_TASK_RELATIONSHIP_CHOICES_QUERY,
+            tenant_key=tenant_key,
+            search=search,
+            exclude_id=exclude_id,
+            limit=limit,
+            offset=offset,
+        ),
+    )
+
+
 class ListTasksDefaultRow(TypedDict):
     id: int
     name: str
     status: str
     active: int
     notes: str
+    parent_id: int | None
+    parent_name: str | None
 
 
 LIST_TASKS_DEFAULT_QUERY = Query(
     name="list_tasks_default",
     sql=(
-        "SELECT id, name, status, active, notes\n"
-        "FROM task\n"
-        "WHERE (?1 = '' OR instr(lower(name), lower(?1)) > 0)\n"
-        "  AND (?2 = '' OR status = ?2)\n"
-        "ORDER BY id\n"
-        "LIMIT ?3 OFFSET ?4"
+        "SELECT child.id, child.name, child.status, child.active, child.notes,\n"
+        "       child.parent_id, parent.name AS parent_name\n"
+        "FROM task AS child\n"
+        "LEFT JOIN task AS parent\n"
+        "  ON parent.id = child.parent_id\n"
+        " AND parent.tenant_key = child.tenant_key\n"
+        "WHERE child.tenant_key = ?1\n"
+        "  AND (?2 = '' OR instr(lower(child.name), lower(?2)) > 0)\n"
+        "  AND (?3 = '' OR child.status = ?3)\n"
+        "ORDER BY child.id\n"
+        "LIMIT ?4 OFFSET ?5"
     ),
     cardinality=Cardinality.MANY,
     parameters=(
+        Parameter("tenant_key", "str"),
         Parameter("search", "str"),
         Parameter("status", "str"),
         Parameter("limit", "int"),
@@ -469,6 +813,8 @@ LIST_TASKS_DEFAULT_QUERY = Query(
         Column("status", "str"),
         Column("active", "int"),
         Column("notes", "str"),
+        Column("parent_id", "int?"),
+        Column("parent_name", "str?"),
     ),
     timeout_ms=None,
 )
@@ -478,6 +824,7 @@ async def list_tasks_default(
     db: Database,
     /,
     *,
+    tenant_key: str,
     search: str,
     status: str,
     limit: int,
@@ -487,6 +834,7 @@ async def list_tasks_default(
         "list[ListTasksDefaultRow]",
         await db.run(
             LIST_TASKS_DEFAULT_QUERY,
+            tenant_key=tenant_key,
             search=search,
             status=status,
             limit=limit,
@@ -501,20 +849,28 @@ class ListTasksNameAscRow(TypedDict):
     status: str
     active: int
     notes: str
+    parent_id: int | None
+    parent_name: str | None
 
 
 LIST_TASKS_NAME_ASC_QUERY = Query(
     name="list_tasks_name_asc",
     sql=(
-        "SELECT id, name, status, active, notes\n"
-        "FROM task\n"
-        "WHERE (?1 = '' OR instr(lower(name), lower(?1)) > 0)\n"
-        "  AND (?2 = '' OR status = ?2)\n"
-        "ORDER BY name, id\n"
-        "LIMIT ?3 OFFSET ?4"
+        "SELECT child.id, child.name, child.status, child.active, child.notes,\n"
+        "       child.parent_id, parent.name AS parent_name\n"
+        "FROM task AS child\n"
+        "LEFT JOIN task AS parent\n"
+        "  ON parent.id = child.parent_id\n"
+        " AND parent.tenant_key = child.tenant_key\n"
+        "WHERE child.tenant_key = ?1\n"
+        "  AND (?2 = '' OR instr(lower(child.name), lower(?2)) > 0)\n"
+        "  AND (?3 = '' OR child.status = ?3)\n"
+        "ORDER BY child.name, child.id\n"
+        "LIMIT ?4 OFFSET ?5"
     ),
     cardinality=Cardinality.MANY,
     parameters=(
+        Parameter("tenant_key", "str"),
         Parameter("search", "str"),
         Parameter("status", "str"),
         Parameter("limit", "int"),
@@ -526,6 +882,8 @@ LIST_TASKS_NAME_ASC_QUERY = Query(
         Column("status", "str"),
         Column("active", "int"),
         Column("notes", "str"),
+        Column("parent_id", "int?"),
+        Column("parent_name", "str?"),
     ),
     timeout_ms=None,
 )
@@ -535,6 +893,7 @@ async def list_tasks_name_asc(
     db: Database,
     /,
     *,
+    tenant_key: str,
     search: str,
     status: str,
     limit: int,
@@ -544,6 +903,7 @@ async def list_tasks_name_asc(
         "list[ListTasksNameAscRow]",
         await db.run(
             LIST_TASKS_NAME_ASC_QUERY,
+            tenant_key=tenant_key,
             search=search,
             status=status,
             limit=limit,
@@ -558,20 +918,28 @@ class ListTasksNameDescRow(TypedDict):
     status: str
     active: int
     notes: str
+    parent_id: int | None
+    parent_name: str | None
 
 
 LIST_TASKS_NAME_DESC_QUERY = Query(
     name="list_tasks_name_desc",
     sql=(
-        "SELECT id, name, status, active, notes\n"
-        "FROM task\n"
-        "WHERE (?1 = '' OR instr(lower(name), lower(?1)) > 0)\n"
-        "  AND (?2 = '' OR status = ?2)\n"
-        "ORDER BY name DESC, id DESC\n"
-        "LIMIT ?3 OFFSET ?4"
+        "SELECT child.id, child.name, child.status, child.active, child.notes,\n"
+        "       child.parent_id, parent.name AS parent_name\n"
+        "FROM task AS child\n"
+        "LEFT JOIN task AS parent\n"
+        "  ON parent.id = child.parent_id\n"
+        " AND parent.tenant_key = child.tenant_key\n"
+        "WHERE child.tenant_key = ?1\n"
+        "  AND (?2 = '' OR instr(lower(child.name), lower(?2)) > 0)\n"
+        "  AND (?3 = '' OR child.status = ?3)\n"
+        "ORDER BY child.name DESC, child.id DESC\n"
+        "LIMIT ?4 OFFSET ?5"
     ),
     cardinality=Cardinality.MANY,
     parameters=(
+        Parameter("tenant_key", "str"),
         Parameter("search", "str"),
         Parameter("status", "str"),
         Parameter("limit", "int"),
@@ -583,6 +951,8 @@ LIST_TASKS_NAME_DESC_QUERY = Query(
         Column("status", "str"),
         Column("active", "int"),
         Column("notes", "str"),
+        Column("parent_id", "int?"),
+        Column("parent_name", "str?"),
     ),
     timeout_ms=None,
 )
@@ -592,6 +962,7 @@ async def list_tasks_name_desc(
     db: Database,
     /,
     *,
+    tenant_key: str,
     search: str,
     status: str,
     limit: int,
@@ -601,6 +972,7 @@ async def list_tasks_name_desc(
         "list[ListTasksNameDescRow]",
         await db.run(
             LIST_TASKS_NAME_DESC_QUERY,
+            tenant_key=tenant_key,
             search=search,
             status=status,
             limit=limit,
@@ -609,58 +981,56 @@ async def list_tasks_name_desc(
     )
 
 
-class UpdateTaskRow(TypedDict):
+class UpdateSubtaskRow(TypedDict):
     id: int
-    name: str
-    status: str
-    active: int
-    notes: str
 
 
-UPDATE_TASK_QUERY = Query(
-    name="update_task",
+UPDATE_SUBTASK_QUERY = Query(
+    name="update_subtask",
     sql=(
         "UPDATE task\n"
-        "SET name = ?2,\n"
-        "    status = ?3,\n"
-        "    active = ?4,\n"
-        "    notes = ?5\n"
-        "WHERE id = ?1\n"
-        "RETURNING id, name, status, active, notes"
+        "SET name = ?4,\n"
+        "    status = ?5,\n"
+        "    active = ?6,\n"
+        "    notes = ?7\n"
+        "WHERE tenant_key = ?1\n"
+        "  AND parent_id = ?2\n"
+        "  AND id = ?3\n"
+        "RETURNING id"
     ),
     cardinality=Cardinality.MAYBE_ONE,
     parameters=(
+        Parameter("tenant_key", "str"),
+        Parameter("parent_id", "int"),
         Parameter("id", "int"),
         Parameter("name", "str"),
         Parameter("status", "str"),
         Parameter("active", "bool"),
         Parameter("notes", "str"),
     ),
-    columns=(
-        Column("id", "int"),
-        Column("name", "str"),
-        Column("status", "str"),
-        Column("active", "int"),
-        Column("notes", "str"),
-    ),
+    columns=(Column("id", "int"),),
     timeout_ms=None,
 )
 
 
-async def update_task(
+async def update_subtask(
     db: Database,
     /,
     *,
+    tenant_key: str,
+    parent_id: int,
     id: int,
     name: str,
     status: str,
     active: bool,
     notes: str,
-) -> UpdateTaskRow | None:
+) -> UpdateSubtaskRow | None:
     return cast(
-        "UpdateTaskRow | None",
+        "UpdateSubtaskRow | None",
         await db.run(
-            UPDATE_TASK_QUERY,
+            UPDATE_SUBTASK_QUERY,
+            tenant_key=tenant_key,
+            parent_id=parent_id,
             id=id,
             name=name,
             status=status,
@@ -670,17 +1040,89 @@ async def update_task(
     )
 
 
+class UpdateTaskRow(TypedDict):
+    id: int
+
+
+UPDATE_TASK_QUERY = Query(
+    name="update_task",
+    sql=(
+        "UPDATE task\n"
+        "SET name = ?3,\n"
+        "    status = ?4,\n"
+        "    active = ?5,\n"
+        "    notes = ?6,\n"
+        "    parent_id = ?7\n"
+        "WHERE tenant_key = ?1\n"
+        "  AND id = ?2\n"
+        "  AND (?7 IS NULL OR ?7 <> ?2)\n"
+        "  AND (\n"
+        "    ?7 IS NULL\n"
+        "    OR EXISTS (\n"
+        "      SELECT 1\n"
+        "      FROM task AS parent\n"
+        "      WHERE parent.tenant_key = ?1\n"
+        "        AND parent.id = ?7\n"
+        "    )\n"
+        "  )\n"
+        "RETURNING id"
+    ),
+    cardinality=Cardinality.MAYBE_ONE,
+    parameters=(
+        Parameter("tenant_key", "str"),
+        Parameter("id", "int"),
+        Parameter("name", "str"),
+        Parameter("status", "str"),
+        Parameter("active", "bool"),
+        Parameter("notes", "str"),
+        Parameter("parent_id", "int?"),
+    ),
+    columns=(Column("id", "int"),),
+    timeout_ms=None,
+)
+
+
+async def update_task(
+    db: Database,
+    /,
+    *,
+    tenant_key: str,
+    id: int,
+    name: str,
+    status: str,
+    active: bool,
+    notes: str,
+    parent_id: int | None,
+) -> UpdateTaskRow | None:
+    return cast(
+        "UpdateTaskRow | None",
+        await db.run(
+            UPDATE_TASK_QUERY,
+            tenant_key=tenant_key,
+            id=id,
+            name=name,
+            status=status,
+            active=active,
+            notes=notes,
+            parent_id=parent_id,
+        ),
+    )
+
+
 UPSERT_ADMIN_ROLE_QUERY = Query(
     name="upsert_admin_role",
     sql=(
-        "INSERT INTO admin_role (user_id, role)\n"
-        "VALUES (?1, ?2)\n"
-        "ON CONFLICT (user_id) DO UPDATE SET role = excluded.role"
+        "INSERT INTO admin_role (user_id, role, tenant_key)\n"
+        "VALUES (?1, ?2, ?3)\n"
+        "ON CONFLICT (user_id) DO UPDATE SET\n"
+        "    role = excluded.role,\n"
+        "    tenant_key = excluded.tenant_key"
     ),
     cardinality=Cardinality.EXEC,
     parameters=(
         Parameter("user_id", "str"),
         Parameter("role", "str"),
+        Parameter("tenant_key", "str"),
     ),
     columns=(),
     timeout_ms=None,
@@ -693,6 +1135,7 @@ async def upsert_admin_role(
     *,
     user_id: str,
     role: str,
+    tenant_key: str,
 ) -> CommandResult:
     return cast(
         "CommandResult",
@@ -700,6 +1143,7 @@ async def upsert_admin_role(
             UPSERT_ADMIN_ROLE_QUERY,
             user_id=user_id,
             role=role,
+            tenant_key=tenant_key,
         ),
     )
 
@@ -708,44 +1152,65 @@ __all__ = [
     "CLOSE_TASK_QUERY",
     "COUNT_ADMIN_AUDIT_EVENTS_FOR_OBJECT_QUERY",
     "COUNT_TASKS_QUERY",
+    "COUNT_TASK_RELATIONSHIP_CHOICES_QUERY",
     "CREATE_ADMIN_AUDIT_EVENT_QUERY",
+    "CREATE_SUBTASK_QUERY",
     "CREATE_TASK_QUERY",
+    "DELETE_SUBTASK_QUERY",
     "DELETE_TASK_QUERY",
     "GET_ADMIN_ROLE_QUERY",
     "GET_TASK_QUERY",
+    "GET_TASK_RELATIONSHIP_CHOICE_QUERY",
     "LIST_ADMIN_AUDIT_EVENTS_FOR_OBJECT_QUERY",
     "LIST_ADMIN_AUDIT_EVENTS_QUERY",
+    "LIST_SUBTASKS_QUERY",
     "LIST_TASKS_DEFAULT_QUERY",
     "LIST_TASKS_NAME_ASC_QUERY",
     "LIST_TASKS_NAME_DESC_QUERY",
+    "LIST_TASK_RELATIONSHIP_CHOICES_QUERY",
+    "UPDATE_SUBTASK_QUERY",
     "UPDATE_TASK_QUERY",
     "UPSERT_ADMIN_ROLE_QUERY",
     "CloseTaskRow",
     "CountAdminAuditEventsForObjectRow",
+    "CountTaskRelationshipChoicesRow",
     "CountTasksRow",
+    "CreateSubtaskRow",
     "CreateTaskRow",
+    "DeleteSubtaskRow",
     "DeleteTaskRow",
     "GetAdminRoleRow",
+    "GetTaskRelationshipChoiceRow",
     "GetTaskRow",
     "ListAdminAuditEventsForObjectRow",
     "ListAdminAuditEventsRow",
+    "ListSubtasksRow",
+    "ListTaskRelationshipChoicesRow",
     "ListTasksDefaultRow",
     "ListTasksNameAscRow",
     "ListTasksNameDescRow",
+    "UpdateSubtaskRow",
     "UpdateTaskRow",
     "close_task",
     "count_admin_audit_events_for_object",
+    "count_task_relationship_choices",
     "count_tasks",
     "create_admin_audit_event",
+    "create_subtask",
     "create_task",
+    "delete_subtask",
     "delete_task",
     "get_admin_role",
     "get_task",
+    "get_task_relationship_choice",
     "list_admin_audit_events",
     "list_admin_audit_events_for_object",
+    "list_subtasks",
+    "list_task_relationship_choices",
     "list_tasks_default",
     "list_tasks_name_asc",
     "list_tasks_name_desc",
+    "update_subtask",
     "update_task",
     "upsert_admin_role",
 ]

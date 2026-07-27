@@ -13,14 +13,20 @@ from hayate_admin import (
     AdminAction,
     AdminBulkAction,
     AdminField,
+    AdminInline,
+    AdminRelationship,
     AdminResource,
     AdminSite,
     AdminValidationError,
     AuditEvent,
     AuditHistoryPage,
     BulkActionResult,
+    InlineCollection,
+    InlineMutationResult,
     ListQuery,
     Page,
+    RelationshipChoice,
+    RelationshipPage,
 )
 
 ORIGIN = "https://admin.example"
@@ -834,3 +840,502 @@ async def test_form_body_limit_and_media_type_are_enforced():
         body="{}",
     )
     assert response.status == 415
+
+
+class SmallRepository:
+    def __init__(self, records):
+        self.records = records
+        self.created: list[Mapping[str, object]] = []
+
+    async def list(self, query):
+        return Page(tuple(self.records.values()), len(self.records))
+
+    async def get(self, object_id):
+        return self.records.get(object_id)
+
+    async def create(self, values):
+        self.created.append(values)
+        object_id = str(len(self.records) + 1)
+        record = {"id": object_id, **values}
+        self.records[object_id] = record
+        return record
+
+    async def update(self, object_id, values):
+        record = self.records.get(object_id)
+        if record is None:
+            return None
+        record.update(values)
+        return record
+
+    async def delete(self, object_id):
+        return self.records.pop(object_id, None) is not None
+
+
+async def test_relationship_choices_are_bounded_resolved_and_preloaded_without_n_plus_one():
+    class TaskRepository(SmallRepository):
+        async def create(self, values):
+            record = await super().create(values)
+            record["project_name"] = "Public project"
+            return record
+
+    project_repository = SmallRepository(
+        {
+            "p1": {"id": "p1", "name": "Public project"},
+            "secret": {"id": "secret", "name": "Secret tenant project"},
+        }
+    )
+    task_repository = TaskRepository(
+        {
+            "t1": {
+                "id": "t1",
+                "name": "Existing task",
+                "project_id": "p1",
+                "project_name": "Public project",
+            }
+        }
+    )
+    search_calls = []
+    resolve_calls = []
+
+    async def search(context, source, target, relationship, source_object_id, query):
+        search_calls.append((source_object_id, query))
+        choices = (RelationshipChoice("p1", "Public project"),)
+        if query.search and "public" not in query.search.casefold():
+            choices = ()
+        return RelationshipPage(choices, len(choices))
+
+    async def resolve(
+        context,
+        source,
+        target,
+        relationship,
+        source_object_id,
+        related_object_id,
+    ):
+        resolve_calls.append((source_object_id, related_object_id))
+        if related_object_id != "p1":
+            return None
+        return RelationshipChoice("p1", "Public project")
+
+    projects = AdminResource(
+        "projects",
+        "Projects",
+        "Project",
+        (
+            AdminField("id", "ID", required=False, read_only=True),
+            AdminField("name", "Name"),
+        ),
+        project_repository,
+        title_field="name",
+    )
+    tasks = AdminResource(
+        "tasks",
+        "Tasks",
+        "Task",
+        (
+            AdminField("id", "ID", required=False, read_only=True),
+            AdminField("name", "Name"),
+            AdminField("project_id", "Project", list_display=False),
+            AdminField(
+                "project_name",
+                "Project",
+                required=False,
+                read_only=True,
+            ),
+        ),
+        task_repository,
+        relationships=(
+            AdminRelationship(
+                "project_id",
+                "projects",
+                "project_name",
+                search,
+                resolve,
+                max_choices=1,
+            ),
+        ),
+        title_field="name",
+    )
+    audit_events = []
+
+    async def authorize(context, action, admin_resource, object_id):
+        return Actor("operator", "Operator")
+
+    async def audit(event):
+        audit_events.append(event)
+
+    app = Hayate()
+    site = AdminSite(
+        title="Relations",
+        allowed_origins={ORIGIN},
+        authorize=authorize,
+        audit=audit,
+    )
+    site.add(projects)
+    site.add(tasks)
+    site.register(app)
+
+    create_form = await app.request("/admin/tasks/create")
+    create_body = await response_text(create_form)
+    assert create_form.status == 200
+    assert "Public project" in create_body
+    assert "Secret tenant project" not in create_body
+    assert ">Search Project</a>" in create_body
+
+    resolve_calls.clear()
+    oversized_selection = await app.request(f"/admin/tasks/create?relation_project_id={'x' * 256}")
+    assert oversized_selection.status == 403
+    assert resolve_calls == []
+
+    chooser = await app.request("/admin/tasks/relationship/project_id/choices?q=public")
+    chooser_body = await response_text(chooser)
+    assert chooser.status == 200
+    assert "Public project" in chooser_body
+    assert "Secret tenant project" not in chooser_body
+    assert "relation_project_id=p1" in chooser_body
+
+    rejected = await app.request(
+        "/admin/tasks/create",
+        method="POST",
+        headers=mutation_headers(),
+        body=urlencode({"name": "Rejected", "project_id": "secret"}),
+    )
+    rejected_body = await response_text(rejected)
+    assert rejected.status == 422
+    assert "Select an authorized related record." in rejected_body
+    assert "Secret tenant project" not in rejected_body
+    assert task_repository.created == []
+
+    created = await app.request(
+        "/admin/tasks/create",
+        method="POST",
+        headers=mutation_headers(),
+        body=urlencode({"name": "Created", "project_id": "p1"}),
+    )
+    assert created.status == 303
+    assert dict(task_repository.created[-1]) == {
+        "name": "Created",
+        "project_id": "p1",
+    }
+
+    search_calls.clear()
+    resolve_calls.clear()
+    listing = await app.request("/admin/tasks")
+    assert listing.status == 200
+    assert "Public project" in await response_text(listing)
+    assert search_calls == []
+    assert resolve_calls == []
+    assert [event.phase for event in audit_events] == [
+        "attempt",
+        "failure",
+        "attempt",
+        "success",
+    ]
+
+
+async def test_unauthorized_preloaded_relationship_display_is_redacted():
+    project_repository = SmallRepository(
+        {"secret": {"id": "secret", "name": "Secret tenant project"}}
+    )
+    task_repository = SmallRepository(
+        {
+            "t1": {
+                "id": "t1",
+                "name": "Task",
+                "project_id": "secret",
+                "project_name": "Secret tenant project",
+            }
+        }
+    )
+
+    async def search(context, source, target, relationship, source_object_id, query):
+        return RelationshipPage((), 0)
+
+    async def resolve(
+        context,
+        source,
+        target,
+        relationship,
+        source_object_id,
+        related_object_id,
+    ):
+        return None
+
+    projects = AdminResource(
+        "projects",
+        "Projects",
+        "Project",
+        (
+            AdminField("id", "ID", required=False, read_only=True),
+            AdminField("name", "Name"),
+        ),
+        project_repository,
+    )
+    tasks = AdminResource(
+        "tasks",
+        "Tasks",
+        "Task",
+        (
+            AdminField("id", "ID", required=False, read_only=True),
+            AdminField("name", "Name"),
+            AdminField("project_id", "Project", list_display=False),
+            AdminField(
+                "project_name",
+                "Project",
+                required=False,
+                read_only=True,
+            ),
+        ),
+        task_repository,
+        relationships=(
+            AdminRelationship(
+                "project_id",
+                "projects",
+                "project_name",
+                search,
+                resolve,
+            ),
+        ),
+    )
+
+    async def authorize(context, action, admin_resource, object_id):
+        if admin_resource is projects and object_id == "secret":
+            return None
+        return Actor("operator", "Operator")
+
+    async def audit(event):
+        pass
+
+    app = Hayate()
+    site = AdminSite(
+        title="Relations",
+        allowed_origins={ORIGIN},
+        authorize=authorize,
+        audit=audit,
+    )
+    site.add(projects)
+    site.add(tasks)
+    site.register(app)
+    response = await app.request("/admin/tasks")
+    body = await response_text(response)
+    assert response.status == 200
+    assert "Secret tenant project" not in body
+
+
+async def test_inline_mutations_are_single_bounded_parent_scoped_and_audited():
+    repository = SmallRepository(
+        {
+            "parent": {
+                "id": "parent",
+                "name": "Parent",
+                "parent_id": None,
+                "parent_name": None,
+            },
+            "child": {
+                "id": "child",
+                "name": "Child",
+                "parent_id": "parent",
+                "parent_name": "Parent",
+            },
+            "other": {
+                "id": "other",
+                "name": "Other tenant child",
+                "parent_id": "other-parent",
+                "parent_name": "Other parent",
+            },
+        }
+    )
+    mutation_calls = []
+
+    async def search(context, source, target, relationship, source_object_id, query):
+        return RelationshipPage((RelationshipChoice("parent", "Parent"),), 1)
+
+    async def resolve(
+        context,
+        source,
+        target,
+        relationship,
+        source_object_id,
+        related_object_id,
+    ):
+        record = repository.records.get(related_object_id)
+        if record is None:
+            return None
+        return RelationshipChoice(related_object_id, str(record["name"]))
+
+    async def read(context, parent, target, inline, parent_object_id, limit):
+        children = tuple(
+            record
+            for record in repository.records.values()
+            if record.get("parent_id") == parent_object_id
+        )
+        return InlineCollection(children, len(children))
+
+    async def mutate(context, parent, target, inline, parent_object_id, mutation):
+        mutation_calls.append(mutation)
+        if mutation.operation == "create":
+            object_id = "created-child"
+            record = {
+                "id": object_id,
+                "name": mutation.values["name"],
+                "parent_id": parent_object_id,
+                "parent_name": repository.records[parent_object_id]["name"],
+            }
+            repository.records[object_id] = record
+            return InlineMutationResult(record)
+        if mutation.object_id is None:
+            raise AssertionError("update/delete requires an object ID")
+        record = repository.records.get(mutation.object_id)
+        if record is None or record.get("parent_id") != parent_object_id:
+            raise AdminValidationError({"__all__": "Inline record no longer belongs here."})
+        if mutation.operation == "delete":
+            del repository.records[mutation.object_id]
+            return InlineMutationResult(deleted=True)
+        record["name"] = mutation.values["name"]
+        return InlineMutationResult(record)
+
+    relationship = AdminRelationship(
+        "parent_id",
+        "trees",
+        "parent_name",
+        search,
+        resolve,
+    )
+    inline = AdminInline(
+        "children",
+        "Children",
+        "trees",
+        "parent_id",
+        ("name",),
+        read,
+        mutate,
+        max_items=2,
+    )
+    trees = AdminResource(
+        "trees",
+        "Trees",
+        "Tree",
+        (
+            AdminField("id", "ID", required=False, read_only=True),
+            AdminField("name", "Name"),
+            AdminField("parent_id", "Parent", required=False, list_display=False),
+            AdminField(
+                "parent_name",
+                "Parent name",
+                required=False,
+                read_only=True,
+                list_display=False,
+            ),
+        ),
+        repository,
+        relationships=(relationship,),
+        inlines=(inline,),
+        title_field="name",
+    )
+    audit_events = []
+    denied_view_ids: set[str] = set()
+
+    async def authorize(context, action, admin_resource, object_id):
+        if action == "resource:view" and object_id in denied_view_ids:
+            return None
+        return Actor("operator", "Operator")
+
+    async def audit(event):
+        audit_events.append(event)
+
+    app = Hayate()
+    site = AdminSite(
+        title="Inlines",
+        allowed_origins={ORIGIN},
+        authorize=authorize,
+        audit=audit,
+    )
+    site.add(trees)
+    site.register(app)
+
+    detail = await app.request("/admin/trees/object/parent")
+    assert ">Children</a>" in await response_text(detail)
+    denied_view_ids.add("child")
+    denied_editor = await app.request("/admin/trees/object/parent/inline/children")
+    assert denied_editor.status == 403
+    assert "Child" not in await response_text(denied_editor)
+    denied_view_ids.clear()
+
+    editor = await app.request("/admin/trees/object/parent/inline/children")
+    editor_body = await response_text(editor)
+    assert editor.status == 200
+    assert "1 of 2 allowed records." in editor_body
+    assert "Save inline record" in editor_body
+    assert "Add inline record" in editor_body
+
+    unsupported = await app.request(
+        "/admin/trees/object/parent/inline/children",
+        method="POST",
+        headers={
+            "content-type": "application/json",
+            "origin": ORIGIN,
+            "sec-fetch-site": "same-origin",
+        },
+        body="{}",
+    )
+    assert unsupported.status == 415
+
+    substituted = await app.request(
+        "/admin/trees/object/parent/inline/children",
+        method="POST",
+        headers=mutation_headers(),
+        body=urlencode({"operation": "update", "object_id": "other", "name": "Stolen"}),
+    )
+    assert substituted.status == 422
+    assert "does not belong to this parent" in await response_text(substituted)
+    assert mutation_calls == []
+
+    updated = await app.request(
+        "/admin/trees/object/parent/inline/children",
+        method="POST",
+        headers=mutation_headers(),
+        body=urlencode({"operation": "update", "object_id": "child", "name": "Updated child"}),
+    )
+    assert updated.status == 303
+    assert repository.records["child"]["name"] == "Updated child"
+
+    created = await app.request(
+        "/admin/trees/object/parent/inline/children",
+        method="POST",
+        headers=mutation_headers(),
+        body=urlencode({"operation": "create", "name": "Created child"}),
+    )
+    assert created.status == 303
+    assert repository.records["created-child"]["parent_id"] == "parent"
+
+    over_limit = await app.request(
+        "/admin/trees/object/parent/inline/children",
+        method="POST",
+        headers=mutation_headers(),
+        body=urlencode({"operation": "create", "name": "Too many"}),
+    )
+    assert over_limit.status == 422
+    assert "At most 2 inline records are allowed." in await response_text(over_limit)
+    assert len(mutation_calls) == 2
+
+    deleted = await app.request(
+        "/admin/trees/object/parent/inline/children",
+        method="POST",
+        headers=mutation_headers(),
+        body=urlencode({"operation": "delete", "object_id": "child"}),
+    )
+    assert deleted.status == 303
+    assert "child" not in repository.records
+    assert [
+        (event.phase, event.action, event.object_id, event.operation) for event in audit_events
+    ] == [
+        ("failure", "resource:change", None, "inline:trees:children"),
+        ("failure", "resource:change", "other", "inline:trees:children"),
+        ("attempt", "resource:change", "child", "inline:trees:children"),
+        ("success", "resource:change", "child", "inline:trees:children"),
+        ("attempt", "resource:add", None, "inline:trees:children"),
+        ("success", "resource:add", "created-child", "inline:trees:children"),
+        ("failure", "resource:add", None, "inline:trees:children"),
+        ("attempt", "resource:delete", "child", "inline:trees:children"),
+        ("success", "resource:delete", "child", "inline:trees:children"),
+    ]

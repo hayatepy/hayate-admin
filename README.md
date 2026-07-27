@@ -9,8 +9,10 @@ checked SQL rather than ORM or database reflection.
 
 > **Status: pre-release.** The typed CRUD and security core is implemented.
 > The SQLite/generated-SQL, browser, and native Workers/D1 reference paths are
-> implemented. General Django admin parity is not claimed:
-> relationships/inlines remain an explicit Phase 2 gap.
+> implemented, including explicit searchable relationships and bounded inline
+> editing. General Django admin parity is not claimed; saved views,
+> internationalization, and the breadth of Django's mature extension ecosystem
+> remain outside the current surface.
 
 `hayate-admin` is an internal management tool for trusted operators. Public,
 process-centric customer workflows should remain purpose-built application
@@ -33,6 +35,12 @@ The UI receives only a bounded `ListQuery`:
 
 It never receives SQL text, column expressions, table names, or generic
 database access.
+
+Relationships are explicit too. An `AdminRelationship` names the source ID
+field, target resource, preloaded display field, bounded search callback, and
+single-ID resolver. An `AdminInline` names the reverse parent field, editable
+fields, maximum child count, complete bounded reader, and one-record mutation
+callback. Neither contract performs reflection or lazy loading.
 
 ## Minimal integration
 
@@ -116,6 +124,64 @@ site.register(app)
 There is deliberately no default authorizer, no anonymous mode, and no
 built-in superuser.
 
+## Relationships and inlines
+
+Declare the stored ID and preloaded display label as ordinary fields, then
+attach explicit callbacks:
+
+```python
+from hayate_admin import AdminInline, AdminRelationship
+
+tasks = AdminResource(
+    slug="tasks",
+    label="Tasks",
+    singular_label="Task",
+    repository=task_repository,
+    fields=(
+        AdminField("id", "ID", required=False, read_only=True),
+        AdminField("name", "Name"),
+        AdminField("parent_id", "Parent task", required=False, list_display=False),
+        AdminField(
+            "parent_name",
+            "Parent name",
+            required=False,
+            read_only=True,
+            list_display=False,
+        ),
+    ),
+    relationships=(
+        AdminRelationship(
+            "parent_id",
+            "tasks",
+            "parent_name",
+            search_parents,
+            resolve_parent,
+            max_choices=25,
+        ),
+    ),
+    inlines=(
+        AdminInline(
+            "subtasks",
+            "Subtasks",
+            "tasks",
+            "parent_id",
+            ("name",),
+            read_subtasks,
+            mutate_subtask,
+            max_items=10,
+        ),
+    ),
+    title_field="name",
+)
+```
+
+`search_parents` and `resolve_parent` must be tenant-scoped. List/get queries
+must return `parent_name` whenever `parent_id` is non-null. `read_subtasks`
+returns the complete bounded child set, and `mutate_subtask` owns one atomic
+parent/tenant-checked write. See the shared
+[SQLite/D1 task resource](examples/tasks.py) for complete typed callbacks and
+checked SQL.
+
 ## Security contract
 
 Every mutation follows this order:
@@ -149,6 +215,10 @@ Read [the threat model](docs/SECURITY.md) before deploying.
 - paginated/searchable/filterable/sortable change list;
 - record detail;
 - add and edit forms with accessible inline errors;
+- searchable, paginated to-one relationship choices with tenant-scoped
+  resolution, per-target authorization, and preloaded display values;
+- bounded reverse inline create/update/delete with one independently
+  authorized and audited record mutation per request;
 - delete confirmation;
 - allowlisted bulk actions with bounded selection, per-object authorization,
   explicit partial results, and operation-tagged audit evidence;
@@ -158,21 +228,21 @@ Read [the threat model](docs/SECURITY.md) before deploying.
 - ordinary `303` post/redirect/get and htmx `HX-Redirect`;
 - application-injected authorization and redacted audit events.
 
-Relationships/autocomplete, saved filters, and internationalization remain
-tracked Phase 2 work.
+Saved views and internationalization remain tracked Phase 2 work.
 
 ## Executable SQLite reference
 
 The [SQLite example](examples/sqlite/README.md) combines real hayate-auth
 sessions, separately provisioned viewer/editor/operator roles, generated
 hayate-sql list/count/get/create/update/delete/bulk-close functions, persistent
-redacted audit rows, and a Chromium CRUD/search/filter/sort/bulk gate. It is
-the complete minimal integration for the initial package contract.
+redacted audit rows, explicit same-tenant task relationships, bounded subtasks,
+and a Chromium CRUD/search/filter/sort/bulk/relationship/inline gate. It is the
+complete minimal integration for the initial package contract.
 
 The [Workers/D1 gate](examples/workers_d1/README.md) packages the exact same
 resource and generated query facade into workerd. It exercises the full
-authorization, mutation, CRUD, bulk, object-history, escaping, audit, page,
-and fragment contract without ASGI.
+authorization, mutation, CRUD, bulk, relationship, inline, object-history,
+escaping, audit, page, and fragment contract without ASGI.
 
 ## Development
 

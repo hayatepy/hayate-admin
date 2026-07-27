@@ -16,9 +16,8 @@ Measured on 2026-07-27:
 | Wrangler / workerd launcher | `wrangler==4.114.0` |
 | Node.js | `24` in CI; `24.18.0` for the recorded local run |
 | Python Workers interpreter observed by Pywrangler | CPython/Pyodide `3.13.2` |
-| Uncompressed upload | `1113.11 KiB` |
-| Gzip upload | `265.65 KiB` |
-| Attached modules | 126 |
+| Uncompressed upload | `1195.16 KiB` |
+| Gzip upload | `275.64 KiB` |
 
 The size includes candidate wheels for Hayate, hayate-admin, hayate-htmx, and
 hayate-sql plus Jinja and Workers runtime support. The script rejects ASGI,
@@ -34,17 +33,23 @@ AWS, WSGI, package metadata, bytecode, and cache files in the upload.
 4. verifies validation and safe HTML escaping;
 5. creates, lists, gets, updates, bulk-closes, and deletes through generated
    D1 calls;
-6. verifies a partial bulk result and per-object operation-tagged audit;
-7. verifies full-page and htmx fragment representations;
-8. reads persistent audit rows and proves that bound/form values are absent;
-9. renders separately authorized, paginated object history and repeats the
+6. searches and resolves same-tenant relationships while proving that another
+   tenant's choice, label, and object ID are not disclosed;
+7. creates, updates, and deletes bounded inline children while rejecting a
+   cross-tenant child-ID substitution before storage;
+8. verifies a partial bulk result and per-object operation-tagged audit;
+9. verifies full-page and htmx fragment representations;
+10. reads persistent audit rows and proves that bound/form values are absent;
+11. renders separately authorized, paginated object history and repeats the
    non-disclosure assertion on its HTML.
 
 SQLite list count/results share a native transaction. D1 request factories use
-a `first-primary` session for sequential consistency. The local gate preserves
-D1 state but starts a fresh Worker process between scenarios because the
-current Python workerd boundary has a cumulative POST-body failure that also
-reproduces in the raw Workers SDK control.
+a `first-primary` session for sequential consistency. Each inline request
+performs one parent/tenant-checked mutation statement; follow-up reads remain
+in that session. The local gate preserves D1 state but starts a fresh Worker
+process between scenarios because the current Python workerd boundary has a
+cumulative POST-body failure that also reproduces in the raw Workers SDK
+control.
 
 Run it from the repository root with Node 24 first on `PATH`:
 

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import date, datetime
 from math import isfinite
 from types import MappingProxyType
@@ -33,6 +34,7 @@ type FieldKind = Literal[
     "datetime-local",
 ]
 type AuditPhase = Literal["attempt", "success", "failure"]
+type InlineOperation = Literal["create", "update", "delete"]
 type Record = Mapping[str, object]
 type FieldValidator = Callable[[object], str | None]
 
@@ -106,7 +108,7 @@ class AdminField:
     filterable: bool = False
     max_length: int = 255
     choices: tuple[tuple[str, str], ...] = ()
-    validator: FieldValidator | None = field(default=None, repr=False, compare=False)
+    validator: FieldValidator | None = dataclass_field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not _IDENTIFIER.fullmatch(self.name):
@@ -271,6 +273,274 @@ class Page:
         object.__setattr__(self, "items", tuple(self.items))
 
 
+@dataclass(frozen=True, slots=True)
+class RelationshipChoice:
+    """One bounded, already tenant-scoped related-object choice."""
+
+    id: str
+    label: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.id, str)
+            or not self.id
+            or len(self.id) > 255
+            or any(ord(character) < 0x20 for character in self.id)
+        ):
+            raise ValueError("relationship choice ID must be a bounded printable string")
+        if (
+            not isinstance(self.label, str)
+            or not self.label
+            or len(self.label) > 255
+            or any(ord(character) < 0x20 for character in self.label)
+        ):
+            raise ValueError("relationship choice label must be a bounded printable string")
+
+
+@dataclass(frozen=True, slots=True)
+class RelationshipQuery:
+    """Bounded search controls passed to an explicit relationship source."""
+
+    search: str | None
+    offset: int
+    limit: int
+
+    def __post_init__(self) -> None:
+        if self.search is not None and (not isinstance(self.search, str) or len(self.search) > 200):
+            raise ValueError("relationship search must not exceed 200 characters")
+        if not isinstance(self.offset, int) or isinstance(self.offset, bool) or self.offset < 0:
+            raise ValueError("relationship offset must be non-negative")
+        if (
+            not isinstance(self.limit, int)
+            or isinstance(self.limit, bool)
+            or not 1 <= self.limit <= 100
+        ):
+            raise ValueError("relationship limit must be in 1-100")
+
+
+@dataclass(frozen=True, slots=True)
+class RelationshipPage:
+    """One bounded page from a tenant-scoped relationship search."""
+
+    items: Sequence[RelationshipChoice]
+    total: int
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.items, Sequence)
+            or isinstance(self.items, (str, bytes))
+            or any(not isinstance(item, RelationshipChoice) for item in self.items)
+        ):
+            raise ValueError("relationship items must contain RelationshipChoice values")
+        if not isinstance(self.total, int) or isinstance(self.total, bool) or self.total < 0:
+            raise ValueError("relationship total must be non-negative")
+        if self.total < len(self.items):
+            raise ValueError("relationship total cannot be smaller than its item count")
+        ids = [item.id for item in self.items]
+        if len(ids) != len(set(ids)):
+            raise ValueError("relationship choice IDs must be unique")
+        object.__setattr__(self, "items", tuple(self.items))
+
+
+class RelationshipSearcher(Protocol):
+    """Search only choices visible in the current application/tenant scope."""
+
+    def __call__(
+        self,
+        context: Context,
+        source_resource: AdminResource,
+        target_resource: AdminResource,
+        relationship: AdminRelationship,
+        source_object_id: str | None,
+        query: RelationshipQuery,
+    ) -> Awaitable[RelationshipPage]: ...
+
+
+class RelationshipResolver(Protocol):
+    """Resolve one submitted ID inside the current application/tenant scope."""
+
+    def __call__(
+        self,
+        context: Context,
+        source_resource: AdminResource,
+        target_resource: AdminResource,
+        relationship: AdminRelationship,
+        source_object_id: str | None,
+        related_object_id: str,
+    ) -> Awaitable[RelationshipChoice | None]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class AdminRelationship:
+    """Explicit to-one relationship with no reflection or lazy loading."""
+
+    field: str
+    target_resource: str
+    display_field: str
+    search: RelationshipSearcher = dataclass_field(repr=False, compare=False)
+    resolve: RelationshipResolver = dataclass_field(repr=False, compare=False)
+    max_choices: int = 25
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.field, str) or not _IDENTIFIER.fullmatch(self.field):
+            raise ValueError(f"unsafe relationship field: {self.field!r}")
+        if not isinstance(self.target_resource, str) or not _SLUG.fullmatch(self.target_resource):
+            raise ValueError(f"unsafe relationship target: {self.target_resource!r}")
+        if not isinstance(self.display_field, str) or not _IDENTIFIER.fullmatch(self.display_field):
+            raise ValueError(f"unsafe relationship display field: {self.display_field!r}")
+        if self.display_field == self.field:
+            raise ValueError(f"{self.field}: relationship display field must be separate")
+        if not callable(self.search) or not callable(self.resolve):
+            raise ValueError(f"{self.field}: relationship callbacks must be callable")
+        if (
+            not isinstance(self.max_choices, int)
+            or isinstance(self.max_choices, bool)
+            or not 1 <= self.max_choices <= 100
+        ):
+            raise ValueError(f"{self.field}: max_choices must be in 1-100")
+
+
+@dataclass(frozen=True, slots=True)
+class InlineCollection:
+    """A complete, bounded child snapshot for one parent object."""
+
+    items: Sequence[Record]
+    total: int
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.items, Sequence)
+            or isinstance(self.items, (str, bytes))
+            or any(not isinstance(item, Mapping) for item in self.items)
+        ):
+            raise ValueError("inline items must be a sequence of records")
+        if (
+            not isinstance(self.total, int)
+            or isinstance(self.total, bool)
+            or not 0 <= self.total <= 100
+        ):
+            raise ValueError("inline total must be in 0-100")
+        if self.total != len(self.items):
+            raise ValueError("inline collection must be a complete bounded snapshot")
+        object.__setattr__(self, "items", tuple(self.items))
+
+
+@dataclass(frozen=True, slots=True)
+class InlineMutation:
+    """Exactly one inline write; repositories never receive a generic cascade."""
+
+    operation: InlineOperation
+    object_id: str | None
+    values: Mapping[str, object] = dataclass_field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.operation not in ("create", "update", "delete"):
+            raise ValueError(f"unsupported inline operation: {self.operation!r}")
+        if self.operation == "create":
+            if self.object_id is not None:
+                raise ValueError("inline create must not include an object ID")
+        elif (
+            not isinstance(self.object_id, str)
+            or not self.object_id
+            or len(self.object_id) > 255
+            or any(ord(character) < 0x20 for character in self.object_id)
+        ):
+            raise ValueError("inline update/delete requires a bounded object ID")
+        if not isinstance(self.values, Mapping) or len(self.values) > 32:
+            raise ValueError("inline values must be a bounded mapping")
+        if self.operation == "delete" and self.values:
+            raise ValueError("inline delete must not include values")
+        object.__setattr__(self, "values", MappingProxyType(dict(self.values)))
+
+
+@dataclass(frozen=True, slots=True)
+class InlineMutationResult:
+    """Result of one repository-owned atomic inline write."""
+
+    record: Record | None = None
+    deleted: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.deleted, bool):
+            raise ValueError("inline deleted must be a boolean")
+        if self.record is not None and not isinstance(self.record, Mapping):
+            raise ValueError("inline result record must be a mapping")
+        if (self.record is None) == (not self.deleted):
+            raise ValueError("inline result must contain one record or confirm deletion")
+        if self.record is not None:
+            object.__setattr__(self, "record", MappingProxyType(dict(self.record)))
+
+
+class InlineReader(Protocol):
+    """Load one complete bounded child collection without per-row queries."""
+
+    def __call__(
+        self,
+        context: Context,
+        parent_resource: AdminResource,
+        target_resource: AdminResource,
+        inline: AdminInline,
+        parent_object_id: str,
+        limit: int,
+    ) -> Awaitable[InlineCollection]: ...
+
+
+class InlineMutator(Protocol):
+    """Own one atomic write and re-check tenant and parent membership in storage."""
+
+    def __call__(
+        self,
+        context: Context,
+        parent_resource: AdminResource,
+        target_resource: AdminResource,
+        inline: AdminInline,
+        parent_object_id: str,
+        mutation: InlineMutation,
+    ) -> Awaitable[InlineMutationResult]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class AdminInline:
+    """One explicit bounded child editor attached to a parent resource."""
+
+    slug: str
+    label: str
+    target_resource: str
+    parent_field: str
+    fields: tuple[str, ...]
+    read: InlineReader = dataclass_field(repr=False, compare=False)
+    mutate: InlineMutator = dataclass_field(repr=False, compare=False)
+    max_items: int = 20
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.slug, str) or not _SLUG.fullmatch(self.slug):
+            raise ValueError(f"unsafe inline slug: {self.slug!r}")
+        if not isinstance(self.label, str) or not self.label or len(self.label) > 120:
+            raise ValueError(f"{self.slug}: inline label must be 1-120 characters")
+        if not isinstance(self.target_resource, str) or not _SLUG.fullmatch(self.target_resource):
+            raise ValueError(f"unsafe inline target: {self.target_resource!r}")
+        if not isinstance(self.parent_field, str) or not _IDENTIFIER.fullmatch(self.parent_field):
+            raise ValueError(f"unsafe inline parent field: {self.parent_field!r}")
+        if (
+            not isinstance(self.fields, tuple)
+            or not self.fields
+            or len(self.fields) > 32
+            or any(
+                not isinstance(name, str) or not _IDENTIFIER.fullmatch(name) for name in self.fields
+            )
+            or len(self.fields) != len(set(self.fields))
+        ):
+            raise ValueError(f"{self.slug}: inline fields must be unique safe identifiers")
+        if not callable(self.read) or not callable(self.mutate):
+            raise ValueError(f"{self.slug}: inline callbacks must be callable")
+        if (
+            not isinstance(self.max_items, int)
+            or isinstance(self.max_items, bool)
+            or not 1 <= self.max_items <= 100
+        ):
+            raise ValueError(f"{self.slug}: max_items must be in 1-100")
+
+
 class AdminRepository(Protocol):
     """Storage operations normally implemented with generated hayate-sql calls."""
 
@@ -301,7 +571,7 @@ class BulkActionResult:
     """Complete per-object outcome returned by an explicit bulk callback."""
 
     succeeded: Sequence[str]
-    failed: Mapping[str, str] = field(default_factory=dict)
+    failed: Mapping[str, str] = dataclass_field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if (
@@ -348,7 +618,7 @@ class AdminBulkAction:
     slug: str
     label: str
     required_action: AdminAction
-    handler: BulkActionHandler = field(repr=False, compare=False)
+    handler: BulkActionHandler = dataclass_field(repr=False, compare=False)
     max_selected: int = 100
 
     def __post_init__(self) -> None:
@@ -383,6 +653,8 @@ class AdminResource:
     id_field: str = "id"
     title_field: str = "id"
     page_size: int = 50
+    relationships: tuple[AdminRelationship, ...] = ()
+    inlines: tuple[AdminInline, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.slug, str) or not _SLUG.fullmatch(self.slug):
@@ -422,6 +694,42 @@ class AdminResource:
         action_slugs = [action.slug for action in self.bulk_actions]
         if len(action_slugs) != len(set(action_slugs)):
             raise ValueError(f"{self.slug}: bulk action slugs must be unique")
+        if not isinstance(self.relationships, tuple) or any(
+            not isinstance(relationship, AdminRelationship) for relationship in self.relationships
+        ):
+            raise ValueError(f"{self.slug}: relationships must contain AdminRelationship values")
+        relationship_fields = [relationship.field for relationship in self.relationships]
+        if len(relationship_fields) != len(set(relationship_fields)):
+            raise ValueError(f"{self.slug}: relationship fields must be unique")
+        for relationship in self.relationships:
+            relation_field = self.field_map.get(relationship.field)
+            display_field = self.field_map.get(relationship.display_field)
+            if (
+                relation_field is None
+                or relation_field.read_only
+                or relation_field.kind != "text"
+                or relation_field.max_length > 255
+            ):
+                raise ValueError(
+                    f"{self.slug}.{relationship.field}: relationship field must be "
+                    "a writable text field bounded to 255 characters"
+                )
+            if display_field is None or not display_field.read_only:
+                raise ValueError(
+                    f"{self.slug}.{relationship.field}: display_field must be a "
+                    "declared read-only field"
+                )
+            if relationship.field in (self.id_field, self.title_field):
+                raise ValueError(
+                    f"{self.slug}.{relationship.field}: ID/title fields cannot be relationships"
+                )
+        if not isinstance(self.inlines, tuple) or any(
+            not isinstance(inline, AdminInline) for inline in self.inlines
+        ):
+            raise ValueError(f"{self.slug}: inlines must contain AdminInline values")
+        inline_slugs = [inline.slug for inline in self.inlines]
+        if len(inline_slugs) != len(set(inline_slugs)):
+            raise ValueError(f"{self.slug}: inline slugs must be unique")
         if (
             not isinstance(self.page_size, int)
             or isinstance(self.page_size, bool)
@@ -445,6 +753,16 @@ class AdminResource:
     @property
     def bulk_action_map(self) -> Mapping[str, AdminBulkAction]:
         return MappingProxyType({action.slug: action for action in self.bulk_actions})
+
+    @property
+    def relationship_map(self) -> Mapping[str, AdminRelationship]:
+        return MappingProxyType(
+            {relationship.field: relationship for relationship in self.relationships}
+        )
+
+    @property
+    def inline_map(self) -> Mapping[str, AdminInline]:
+        return MappingProxyType({inline.slug: inline for inline in self.inlines})
 
 
 @dataclass(frozen=True, slots=True)

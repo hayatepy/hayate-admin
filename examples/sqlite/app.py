@@ -78,6 +78,7 @@ def initialize_database(path: str | Path) -> None:
 class _Identity:
     actor: Actor
     role: AdminRole
+    tenant_key: str
 
 
 @dataclass(slots=True)
@@ -129,8 +130,11 @@ def create_example(
         role_row = await get_admin_role(database, user_id=user_id)
         if role_row is None or role_row["role"] not in _ACTIONS:
             return None
+        tenant_key = role_row.get("tenant_key")
+        if not isinstance(tenant_key, str) or not tenant_key:
+            return None
         role = cast(AdminRole, role_row["role"])
-        resolved_identity = _Identity(Actor(user_id, email), role)
+        resolved_identity = _Identity(Actor(user_id, email), role, tenant_key)
         context.set(_IDENTITY_KEY, resolved_identity)
         return resolved_identity
 
@@ -159,6 +163,18 @@ def create_example(
             error_type=event.error_type,
         )
 
+    def repository_factory(context: Context) -> TaskRepository:
+        resolved_identity = context.get(_IDENTITY_KEY)
+        if not isinstance(resolved_identity, _Identity):
+            raise RuntimeError("admin repository resolved before tenant authorization")
+        return TaskRepository(
+            database,
+            task_queries,
+            tenant_key=resolved_identity.tenant_key,
+            list_scope=database.transaction,
+            mutation_scope=database.transaction,
+        )
+
     admin = AdminSite(
         title="SQLite Operations",
         allowed_origins={origin},
@@ -166,16 +182,7 @@ def create_example(
         audit=audit,
         history=audit_history_reader(database, task_queries),
     )
-    admin.add(
-        task_resource(
-            TaskRepository(
-                database,
-                task_queries,
-                list_scope=database.transaction,
-                mutation_scope=database.transaction,
-            )
-        )
-    )
+    admin.add(task_resource(repository_factory))
     admin.register(app)
 
     @app.get("/")
@@ -199,6 +206,7 @@ async def seed_user(
     email: str,
     password: str,
     role: AdminRole,
+    tenant_key: str = "alpha",
 ) -> str:
     """Create a demo identity, then grant its role outside the public auth API."""
     auth_adapter = SQLiteAdapter(str(database_path))
@@ -231,7 +239,12 @@ async def seed_user(
 
     database = SQLiteDatabase(database_path)
     try:
-        await upsert_admin_role(database, user_id=user_id, role=role)
+        await upsert_admin_role(
+            database,
+            user_id=user_id,
+            role=role,
+            tenant_key=tenant_key,
+        )
     finally:
         await database.close()
     return user_id

@@ -19,6 +19,18 @@ Bulk POSTs require `resource:bulk`, the action's declared change/delete
 permission at resource scope, and that permission again for every selected
 object ID. Any denial stops the entire callback before storage runs.
 
+Relationship choices require permission for the target resource and for each
+returned target object. A submitted relationship ID is resolved again through
+the application callback in the current request/tenant scope and authorized as
+that exact target object. An ID accepted on another tenant, account, or request
+must resolve to `None`; labels from rejected IDs are never rendered.
+
+Inline routes authorize the exact parent, target resource, and child operation.
+Update and delete IDs must occur in the reader's complete parent-scoped
+snapshot before the mutator is called. This UI check is defense in depth: the
+mutator must repeat tenant and parent membership checks in its storage
+statement.
+
 ## Cross-site requests
 
 Every POST requires an `Origin` exactly matching `allowed_origins`. Requests
@@ -50,6 +62,24 @@ interpolate it into SQL, even though the site already allowlists it.
 Generated hayate-sql functions are the recommended boundary. Transactions,
 optimistic concurrency, referential integrity, and row-level authorization
 remain repository responsibilities.
+
+Relationship search and resolution callbacks must query only the current
+tenant or account. Search returns a bounded `RelationshipPage`; resolution
+returns one `RelationshipChoice` or `None`. List/detail repositories must
+preload every relationship display field in their checked query. The admin
+rejects a relationship ID without its declared display value, preventing
+implicit per-row fetches and N+1 behavior.
+Relationship create/update statements must repeat the target tenant/account
+condition rather than relying only on the earlier resolver. A composite
+tenant/parent foreign key is recommended where the database supports it.
+
+An inline reader returns one complete `InlineCollection` of at most the
+declared `max_items` children. One request carries exactly one
+`InlineMutation`; there is no generic cascade or multi-row formset commit.
+Create should use a checked `INSERT ... SELECT` or equivalent parent existence
+condition. Update/delete should include tenant, parent ID, and child ID in the
+same `WHERE` clause. The SQLite and D1 examples use those semantics, so a
+concurrent move or cross-tenant ID substitution cannot widen the write.
 
 Bulk callbacks receive only the request context, resolved repository, and a
 deduplicated tuple of at most 100 already-authorized IDs. They must return a
@@ -95,8 +125,11 @@ than ordinary record viewing when appropriate.
 - form body: 64 KiB;
 - individual field: at most 16 KiB and usually the lower field maximum;
 - search: 200 characters;
+- relationship search: 200 characters and at most 100 choices per page;
 - filter choices: 100 per field;
 - page size: 100 records;
+- inline collection: complete and at most 100 records, with a configurable
+  lower per-inline maximum;
 - selected bulk IDs: 100, or the action's lower declared limit;
 - object history: 50 events per page;
 - page number: 1–1,000,000;

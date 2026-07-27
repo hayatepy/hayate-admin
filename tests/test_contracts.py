@@ -10,13 +10,21 @@ from hayate_admin import (
     AdminAsset,
     AdminBulkAction,
     AdminField,
+    AdminInline,
+    AdminRelationship,
     AdminResource,
     AdminValidationError,
     AuditEvent,
     AuditHistoryPage,
     BulkActionResult,
+    InlineCollection,
+    InlineMutation,
+    InlineMutationResult,
     ListQuery,
     Page,
+    RelationshipChoice,
+    RelationshipPage,
+    RelationshipQuery,
 )
 
 
@@ -149,6 +157,109 @@ def test_bulk_action_and_result_contracts_fail_closed():
             (id_field,),
             repository,
             bulk_actions=(action, action),
+        )
+
+
+def test_relationship_and_inline_contracts_are_explicit_and_bounded():
+    async def search(context, source, target, relationship, source_object_id, query):
+        return RelationshipPage((RelationshipChoice("1", "Parent"),), 1)
+
+    async def resolve(
+        context,
+        source,
+        target,
+        relationship,
+        source_object_id,
+        related_object_id,
+    ):
+        return RelationshipChoice(related_object_id, "Parent")
+
+    async def read(context, parent, target, inline, parent_object_id, limit):
+        return InlineCollection((), 0)
+
+    async def mutate(context, parent, target, inline, parent_object_id, mutation):
+        return InlineMutationResult(deleted=True)
+
+    relationship = AdminRelationship(
+        "parent_id",
+        "items",
+        "parent_name",
+        search,
+        resolve,
+        max_choices=10,
+    )
+    inline = AdminInline(
+        "children",
+        "Children",
+        "items",
+        "parent_id",
+        ("name",),
+        read,
+        mutate,
+        max_items=5,
+    )
+    resource = AdminResource(
+        "items",
+        "Items",
+        "Item",
+        (
+            AdminField("id", "ID", required=False, read_only=True),
+            AdminField("name", "Name"),
+            AdminField("parent_id", "Parent", required=False, list_display=False),
+            AdminField(
+                "parent_name",
+                "Parent name",
+                required=False,
+                read_only=True,
+            ),
+        ),
+        EmptyRepository(),
+        relationships=(relationship,),
+        inlines=(inline,),
+    )
+    assert resource.relationship_map["parent_id"] is relationship
+    assert resource.inline_map["children"] is inline
+    assert RelationshipQuery("parent", 0, 10).limit == 10
+    assert InlineMutation("create", None, {"name": "Child"}).operation == "create"
+    assert InlineMutationResult({"id": "1"}).deleted is False
+
+    with pytest.raises(ValueError, match="max_choices"):
+        AdminRelationship("parent_id", "items", "parent_name", search, resolve, 101)
+    with pytest.raises(ValueError, match="complete bounded snapshot"):
+        InlineCollection((), 1)
+    with pytest.raises(ValueError, match="must not include values"):
+        InlineMutation("delete", "1", {"name": "secret"})
+    with pytest.raises(ValueError, match="one record or confirm"):
+        InlineMutationResult()
+    with pytest.raises(ValueError, match="display_field"):
+        AdminResource(
+            "items",
+            "Items",
+            "Item",
+            (
+                AdminField("id", "ID", required=False, read_only=True),
+                AdminField("parent_id", "Parent", required=False),
+            ),
+            EmptyRepository(),
+            relationships=(relationship,),
+        )
+    with pytest.raises(ValueError, match="bounded to 255"):
+        AdminResource(
+            "items",
+            "Items",
+            "Item",
+            (
+                AdminField("id", "ID", required=False, read_only=True),
+                AdminField("parent_id", "Parent", required=False, max_length=256),
+                AdminField(
+                    "parent_name",
+                    "Parent name",
+                    required=False,
+                    read_only=True,
+                ),
+            ),
+            EmptyRepository(),
+            relationships=(relationship,),
         )
 
 

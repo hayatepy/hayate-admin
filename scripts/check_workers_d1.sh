@@ -309,6 +309,186 @@ restart_worker
 status="$(
   curl --silent --dump-header "${headers_file}" --output "${body_file}" \
     --write-out '%{http_code}' \
+    -H 'Authorization: Bearer operator:beta' \
+    -H "Origin: ${origin}" \
+    -H 'Sec-Fetch-Site: same-origin' \
+    --data-urlencode 'name=Beta tenant task' \
+    --data-urlencode 'status=open' \
+    --data-urlencode 'notes=beta-tenant-secret' \
+    "${origin}/admin/tasks/create"
+)"
+test "${status}" = "303"
+grep -Eiq '^location: /admin/tasks/object/3' "${headers_file}"
+
+restart_worker
+
+status="$(
+  curl --silent --output "${body_file}" --write-out '%{http_code}' \
+    -H 'Authorization: Bearer operator' \
+    "${origin}/admin/tasks/relationship/parent_id/choices?q=Beta"
+)"
+test "${status}" = "200"
+grep -Fq "No authorized related records found." "${body_file}"
+if grep -Fq "Beta tenant task" "${body_file}"; then
+  echo "cross-tenant relationship choice reached alpha HTML" >&2
+  exit 1
+fi
+
+status="$(
+  curl --silent --output "${body_file}" --write-out '%{http_code}' \
+    -H 'Authorization: Bearer operator:beta' \
+    "${origin}/admin/tasks/relationship/parent_id/choices?q=Beta"
+)"
+test "${status}" = "200"
+grep -Fq "Beta tenant task" "${body_file}"
+
+status="$(
+  curl --silent --output "${body_file}" --write-out '%{http_code}' \
+    -H 'Authorization: Bearer operator' \
+    "${origin}/admin/tasks/object/3"
+)"
+test "${status}" = "404"
+
+status="$(
+  curl --silent --output "${body_file}" --write-out '%{http_code}' \
+    -H 'Authorization: Bearer operator' \
+    -H "Origin: ${origin}" \
+    -H 'Sec-Fetch-Site: same-origin' \
+    --data-urlencode 'name=Cross tenant relationship' \
+    --data-urlencode 'parent_id=3' \
+    --data-urlencode 'status=open' \
+    --data-urlencode 'notes=relationship-substitution-secret' \
+    "${origin}/admin/tasks/create"
+)"
+test "${status}" = "422"
+grep -Fq "Select an authorized related record." "${body_file}"
+if grep -Fq "Beta tenant task" "${body_file}"; then
+  echo "cross-tenant relationship label reached validation HTML" >&2
+  exit 1
+fi
+
+restart_worker
+
+status="$(
+  curl --silent --dump-header "${headers_file}" --output "${body_file}" \
+    --write-out '%{http_code}' \
+    -H 'Authorization: Bearer operator' \
+    -H "Origin: ${origin}" \
+    -H 'Sec-Fetch-Site: same-origin' \
+    --data-urlencode 'name=Relationship child' \
+    --data-urlencode 'parent_id=1' \
+    --data-urlencode 'status=open' \
+    --data-urlencode 'active=true' \
+    --data-urlencode 'notes=relationship-child-secret' \
+    "${origin}/admin/tasks/create"
+)"
+test "${status}" = "303"
+grep -Eiq '^location: /admin/tasks/object/4' "${headers_file}"
+
+restart_worker
+
+status="$(
+  curl --silent --output "${body_file}" --write-out '%{http_code}' \
+    -H 'Authorization: Bearer operator' \
+    "${origin}/admin/tasks/object/4"
+)"
+test "${status}" = "200"
+grep -Fq "Updated D1 task" "${body_file}"
+
+status="$(
+  curl --silent --output "${body_file}" --write-out '%{http_code}' \
+    -H 'Authorization: Bearer operator' \
+    "${origin}/admin/tasks/object/1/inline/subtasks"
+)"
+test "${status}" = "200"
+grep -Fq "Relationship child" "${body_file}"
+
+status="$(
+  curl --silent --dump-header "${headers_file}" --output "${body_file}" \
+    --write-out '%{http_code}' \
+    -H 'Authorization: Bearer operator' \
+    -H "Origin: ${origin}" \
+    -H 'Sec-Fetch-Site: same-origin' \
+    --data-urlencode 'operation=create' \
+    --data-urlencode 'name=Inline D1 child' \
+    --data-urlencode 'status=open' \
+    --data-urlencode 'active=true' \
+    --data-urlencode 'notes=inline-create-secret' \
+    "${origin}/admin/tasks/object/1/inline/subtasks"
+)"
+test "${status}" = "303"
+grep -Eiq '^location: /admin/tasks/object/1/inline/subtasks' "${headers_file}"
+
+restart_worker
+
+status="$(
+  curl --silent --output "${body_file}" --write-out '%{http_code}' \
+    -H 'Authorization: Bearer operator' \
+    -H "Origin: ${origin}" \
+    -H 'Sec-Fetch-Site: same-origin' \
+    --data-urlencode 'operation=update' \
+    --data-urlencode 'object_id=3' \
+    --data-urlencode 'name=Stolen beta task' \
+    --data-urlencode 'status=open' \
+    --data-urlencode 'active=true' \
+    --data-urlencode 'notes=inline-substitution-secret' \
+    "${origin}/admin/tasks/object/1/inline/subtasks"
+)"
+test "${status}" = "422"
+grep -Fq "does not belong to this parent" "${body_file}"
+if grep -Fq "Beta tenant task" "${body_file}"; then
+  echo "cross-tenant inline record reached alpha HTML" >&2
+  exit 1
+fi
+
+restart_worker
+
+status="$(
+  curl --silent --output "${body_file}" --write-out '%{http_code}' \
+    -H 'Authorization: Bearer operator' \
+    -H "Origin: ${origin}" \
+    -H 'Sec-Fetch-Site: same-origin' \
+    --data-urlencode 'operation=update' \
+    --data-urlencode 'object_id=5' \
+    --data-urlencode 'name=Updated inline D1 child' \
+    --data-urlencode 'status=closed' \
+    --data-urlencode 'active=true' \
+    --data-urlencode 'notes=inline-update-secret' \
+    "${origin}/admin/tasks/object/1/inline/subtasks"
+)"
+test "${status}" = "303"
+
+restart_worker
+
+status="$(
+  curl --silent --output "${body_file}" --write-out '%{http_code}' \
+    -H 'Authorization: Bearer operator' \
+    -H "Origin: ${origin}" \
+    -H 'Sec-Fetch-Site: same-origin' \
+    --data-urlencode 'operation=delete' \
+    --data-urlencode 'object_id=5' \
+    "${origin}/admin/tasks/object/1/inline/subtasks"
+)"
+test "${status}" = "303"
+
+restart_worker
+
+status="$(
+  curl --silent --output "${body_file}" --write-out '%{http_code}' \
+    -H 'Authorization: Bearer operator' \
+    -H "Origin: ${origin}" \
+    -H 'Sec-Fetch-Site: same-origin' \
+    --data-urlencode 'operation=delete' \
+    --data-urlencode 'object_id=4' \
+    "${origin}/admin/tasks/object/1/inline/subtasks"
+)"
+test "${status}" = "303"
+
+restart_worker
+
+status="$(
+  curl --silent --dump-header "${headers_file}" --output "${body_file}" \
+    --write-out '%{http_code}' \
     -H 'Authorization: Bearer operator' \
     -H 'HX-Request: true' \
     "${origin}/admin/tasks?filter_status=closed"
@@ -342,11 +522,12 @@ import sys
 from pathlib import Path
 
 events = json.loads(Path(sys.argv[1]).read_text())
-assert len(events) == 16, events
-assert [event["phase"] for event in events].count("success") == 5
+assert len(events) == 31, events
+assert [event["phase"] for event in events].count("success") == 11
 assert any(event["error_type"] == "CrossSiteRequest" for event in events)
 assert any(event["error_type"] == "AuthorizationDenied" for event in events)
 assert any(event["error_type"] == "ValidationError" for event in events)
+assert any(event["error_type"] == "InvalidInlineForm" for event in events)
 assert sum(event["operation"] == "close" for event in events) == 4
 assert any(
     event["operation"] == "close"
@@ -362,6 +543,13 @@ for forbidden in (
     "update-bound-secret",
     "validation-secret",
     "Denied viewer write",
+    "beta-tenant-secret",
+    "relationship-substitution-secret",
+    "relationship-child-secret",
+    "inline-create-secret",
+    "inline-substitution-secret",
+    "inline-update-secret",
+    "Stolen beta task",
 ):
     assert forbidden not in serialized
 for event in events:
@@ -376,7 +564,10 @@ for event in events:
         "actor_id",
         "error_type",
     }
-print("workerd D1 admin: authorization origin validation escaping CRUD bulk htmx audit")
+print(
+    "workerd D1 admin: authorization origin validation escaping CRUD bulk "
+    "relationships inlines htmx audit"
+)
 PY
 
 status="$(
