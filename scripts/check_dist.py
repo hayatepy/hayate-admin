@@ -20,7 +20,9 @@ def main() -> int:
         names = set(wheel.namelist())
         assert "hayate_admin/py.typed" in names
         assert "hayate_admin/__init__.py" in names
-        assert not any(name.startswith(("tests/", "docs/", "scripts/")) for name in names)
+        assert not any(
+            name.startswith(("examples/", "tests/", "docs/", "scripts/")) for name in names
+        )
         metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
         metadata = email.message_from_bytes(wheel.read(metadata_name))
         assert metadata["Name"] == "hayate-admin"
