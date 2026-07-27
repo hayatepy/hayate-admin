@@ -33,10 +33,14 @@ Changelog = "https://github.com/hayatepy/hayate-admin/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
+  "hayate-auth>=0.10.1,<1",
+  "hayate-sql>=0.1.1,<1",
   "mypy>=1.18",
+  "playwright>=1.54,<2",
   "pytest>=8.3",
   "pytest-asyncio>=0.25",
   "ruff>=0.9",
+  "uvicorn>=0.30,<1",
 ]
 
 [tool.uv.sources]
@@ -44,6 +48,8 @@ hayate-htmx = { git = "https://github.com/hayatepy/hayate-htmx", rev = "c1339009
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = ["browser: requires an installed Chromium browser"]
+pythonpath = ["."]
 testpaths = ["tests"]
 
 [tool.mypy]
@@ -53,7 +59,7 @@ strict = true
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tests", "typing_tests"]
+src = ["src", "examples", "tests", "typing_tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]

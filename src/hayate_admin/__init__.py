@@ -14,6 +14,7 @@ from .contracts import (
     FieldKind,
     ListQuery,
     Page,
+    Record,
 )
 from .site import AdminSite
 
@@ -34,5 +35,6 @@ __all__ = [
     "FieldKind",
     "ListQuery",
     "Page",
+    "Record",
     "__version__",
 ]

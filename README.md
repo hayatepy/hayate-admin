@@ -8,9 +8,9 @@ Secure operational administration for Hayate, using explicit resources and
 checked SQL rather than ORM or database reflection.
 
 > **Status: pre-release.** The typed CRUD and security core is implemented.
-> The package must not be described as Django admin parity until the SQLite,
-> browser, and Workers/D1 evidence in issues
-> [#2](https://github.com/hayatepy/hayate-admin/issues/2) and
+> The SQLite/generated-SQL and browser reference path is implemented. The
+> package must not be described as Django admin parity until the Workers/D1
+> evidence in
 > [#3](https://github.com/hayatepy/hayate-admin/issues/3) is complete.
 
 `hayate-admin` is an internal management tool for trusted operators. Public,
@@ -159,6 +159,14 @@ Bulk actions, relationships/autocomplete, saved filters, object history, and
 internationalization remain tracked Phase 2 work. They are not implied by the
 initial package.
 
+## Executable SQLite reference
+
+The [SQLite example](examples/sqlite/README.md) combines real hayate-auth
+sessions, separately provisioned viewer/editor/operator roles, generated
+hayate-sql list/count/get/create/update/delete functions, persistent redacted
+audit rows, and a Chromium CRUD/search/filter/sort gate. It is the complete
+minimal integration for the initial package contract.
+
 ## Development
 
 Until `hayate-htmx` completes its first PyPI publication, `uv.lock` resolves
@@ -167,9 +175,9 @@ depend on the normal `hayate-htmx>=0.2,<1` package range.
 
 ```sh
 uv sync --locked
-uv run ruff check src tests typing_tests
-uv run ruff format --check src tests typing_tests
-uv run mypy src typing_tests
+uv run ruff check src examples tests typing_tests
+uv run ruff format --check src examples tests typing_tests
+uv run mypy src examples typing_tests
 uv run pytest -q
 uv build
 uv run python scripts/check_dist.py
