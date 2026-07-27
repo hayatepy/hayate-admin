@@ -1,0 +1,59 @@
+[build-system]
+requires = ["uv_build>=0.9,<1"]
+build-backend = "uv_build"
+
+[project]
+name = "hayate-admin"
+version = "0.1.0"
+description = "Secure checked-SQL operational administration for Hayate"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Yusuke Hayashi" }]
+keywords = ["hayate", "admin", "htmx", "operations", "sql"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
+  "Typing :: Typed",
+]
+dependencies = [
+  "hayate>=0.13,<1",
+  "hayate-htmx>=0.2,<1",
+]
+
+[project.urls]
+Repository = "https://github.com/hayatepy/hayate-admin"
+Documentation = "https://github.com/hayatepy/hayate-admin#readme"
+Changelog = "https://github.com/hayatepy/hayate-admin/blob/main/CHANGELOG.md"
+
+[dependency-groups]
+dev = [
+  "mypy>=1.18",
+  "pytest>=8.3",
+  "pytest-asyncio>=0.25",
+  "ruff>=0.9",
+]
+
+[tool.uv.sources]
+hayate-htmx = { git = "https://github.com/hayatepy/hayate-htmx", rev = "c133900998c487a44d40a103c52f2d469047deda" }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "typing_tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]

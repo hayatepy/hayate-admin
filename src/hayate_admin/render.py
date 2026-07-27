@@ -1,0 +1,390 @@
+"""Safely escaped progressive HTML and htmx fragments."""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Mapping, Sequence
+from html import escape
+from urllib.parse import quote, urlencode
+
+from hayate import Context, Response
+from hayate_htmx import HtmxRequest, append_htmx_vary, select_render_mode
+
+from .contracts import Actor, AdminAsset, AdminField, AdminResource, ListQuery, Page, Record
+
+
+def _e(value: object) -> str:
+    return escape(str(value), quote=True)
+
+
+def _display(value: object | None) -> str:
+    if value is None or value == "":
+        return '<span aria-label="empty">—</span>'
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    return _e(value)
+
+
+def _record_value(record: Record, field: str) -> object | None:
+    return record.get(field)
+
+
+def _record_id(resource: AdminResource, record: Record) -> str:
+    value = _record_value(record, resource.id_field)
+    if value is None:
+        raise ValueError(f"{resource.slug}: repository record has no {resource.id_field!r}")
+    return str(value)
+
+
+def _record_title(resource: AdminResource, record: Record) -> str:
+    value = _record_value(record, resource.title_field)
+    return _record_id(resource, record) if value is None else str(value)
+
+
+def _path(prefix: str, resource: AdminResource | None = None, *parts: str) -> str:
+    segments = [prefix.rstrip("/")]
+    if resource is not None:
+        segments.append(resource.slug)
+    segments.extend(quote(part, safe="") for part in parts)
+    return "/".join(segments)
+
+
+def _link(label: object, href: str, *, current: bool = False) -> str:
+    marker = ' aria-current="page"' if current else ""
+    return (
+        f'<a href="{_e(href)}" hx-get="{_e(href)}" hx-target="#hayate-admin" '
+        f'hx-select="#hayate-admin" hx-swap="outerHTML" hx-push-url="true"{marker}>'
+        f"{_e(label)}</a>"
+    )
+
+
+class AdminRenderer:
+    """Pure-Python renderer with no raw record interpolation."""
+
+    __slots__ = ("asset", "prefix", "title")
+
+    def __init__(self, *, prefix: str, title: str, asset: AdminAsset | None) -> None:
+        self.prefix = prefix
+        self.title = title
+        self.asset = asset
+
+    def response(
+        self,
+        context: Context,
+        *,
+        title: str,
+        actor: Actor,
+        content: str,
+        status: int = 200,
+    ) -> Response:
+        main = (
+            '<main id="hayate-admin" tabindex="-1">'
+            f'<nav aria-label="Breadcrumb">{_link(self.title, self.prefix)}</nav>'
+            f"{content}</main>"
+        )
+        script_policy = "'none'" if self.asset is None else "'self'"
+        if select_render_mode(HtmxRequest.from_context(context)) == "fragment":
+            html = main
+        else:
+            script = ""
+            if self.asset is not None:
+                script = (
+                    f'<script src="{_e(self.asset.url)}" integrity="{_e(self.asset.integrity)}" '
+                    'crossorigin="anonymous" defer></script>'
+                )
+            html = (
+                "<!doctype html>"
+                '<html lang="en"><head><meta charset="utf-8">'
+                '<meta name="viewport" content="width=device-width,initial-scale=1">'
+                f"<title>{_e(title)} · {_e(self.title)}</title>{script}</head>"
+                '<body hx-boost="true" hx-target="#hayate-admin" '
+                'hx-select="#hayate-admin" hx-swap="outerHTML">'
+                f"<header><strong>{_e(self.title)}</strong>"
+                f'<span aria-label="Signed in administrator"> — {_e(actor.display)}</span></header>'
+                f"{main}</body></html>"
+            )
+        headers = {
+            "cache-control": "no-store",
+            "content-security-policy": (
+                "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
+                f"script-src {script_policy}; connect-src 'self'; form-action 'self'"
+            ),
+            "referrer-policy": "same-origin",
+            "x-content-type-options": "nosniff",
+        }
+        return append_htmx_vary(context.html(html, status, headers))
+
+    def index(self, resources: Sequence[AdminResource]) -> str:
+        if not resources:
+            listing = "<p>No resources are available to this administrator.</p>"
+        else:
+            items = "".join(
+                f"<li>{_link(resource.label, _path(self.prefix, resource))}</li>"
+                for resource in resources
+            )
+            listing = f'<ul aria-label="Resources">{items}</ul>'
+        return f"<h1>{_e(self.title)}</h1>{listing}"
+
+    def listing(
+        self,
+        resource: AdminResource,
+        page: Page,
+        query: ListQuery,
+        *,
+        can_add: bool,
+        can_change: bool,
+        can_delete: bool,
+    ) -> str:
+        list_fields = tuple(field for field in resource.fields if field.list_display)
+        controls = self._list_controls(resource, query)
+        create = ""
+        if can_add:
+            create_path = _path(self.prefix, resource, "create")
+            create = f"<p>{_link(f'Add {resource.singular_label}', create_path)}</p>"
+
+        if not page.items:
+            table = "<p>No matching records.</p>"
+        else:
+            headings = "".join(
+                f'<th scope="col">{self._sort_heading(resource, field, query)}</th>'
+                for field in list_fields
+            )
+            headings += '<th scope="col">Actions</th>'
+            rows = "".join(
+                self._list_row(
+                    resource,
+                    record,
+                    list_fields,
+                    can_change=can_change,
+                    can_delete=can_delete,
+                )
+                for record in page.items
+            )
+            table = (
+                f"<table><caption>{_e(resource.label)}</caption><thead><tr>{headings}</tr></thead>"
+                f"<tbody>{rows}</tbody></table>"
+            )
+        pagination = self._pagination(resource, page, query)
+        return (
+            f"<h1>{_e(resource.label)}</h1>{create}{controls}"
+            f'<p role="status">{page.total} matching record{"s" if page.total != 1 else ""}.</p>'
+            f"{table}{pagination}"
+        )
+
+    def _list_controls(self, resource: AdminResource, query: ListQuery) -> str:
+        action = _path(self.prefix, resource)
+        search = "" if query.search is None else query.search
+        filters = []
+        for field in resource.fields:
+            if not field.filterable:
+                continue
+            current = query.filters.get(field.name, "")
+            options = ['<option value="">All</option>']
+            options.extend(
+                f'<option value="{_e(value)}"{" selected" if value == current else ""}>'
+                f"{_e(label)}</option>"
+                for value, label in field.choices
+            )
+            filters.append(
+                f"<label>{_e(field.label)}"
+                f'<select name="filter_{_e(field.name)}">{"".join(options)}</select></label>'
+            )
+        return (
+            f'<form method="get" action="{_e(action)}" hx-get="{_e(action)}" '
+            'hx-target="#hayate-admin" hx-select="#hayate-admin" hx-swap="outerHTML" '
+            'hx-push-url="true">'
+            f'<label>Search<input type="search" name="q" value="{_e(search)}" '
+            'maxlength="200"></label>'
+            f'{"".join(filters)}<button type="submit">Apply</button></form>'
+        )
+
+    def _sort_heading(
+        self,
+        resource: AdminResource,
+        field: AdminField,
+        query: ListQuery,
+    ) -> str:
+        if not field.sortable:
+            return _e(field.label)
+        descending = query.order_by == field.name and not query.descending
+        params = self._query_params(query, page=1)
+        params["sort"] = field.name
+        params["direction"] = "desc" if descending else "asc"
+        href = f"{_path(self.prefix, resource)}?{urlencode(params)}"
+        label = field.label
+        if query.order_by == field.name:
+            label += " ↓" if query.descending else " ↑"
+        return _link(label, href, current=query.order_by == field.name)
+
+    def _list_row(
+        self,
+        resource: AdminResource,
+        record: Record,
+        fields: Sequence[AdminField],
+        *,
+        can_change: bool,
+        can_delete: bool,
+    ) -> str:
+        object_id = _record_id(resource, record)
+        detail = _path(self.prefix, resource, "object", object_id)
+        cells = []
+        for index, field in enumerate(fields):
+            value = _record_value(record, field.name)
+            displayed = _display(value)
+            if index == 0:
+                displayed = _link(value if value is not None else object_id, detail)
+            cells.append(f"<td>{displayed}</td>")
+        actions = [_link("View", detail)]
+        if can_change:
+            actions.append(_link("Edit", f"{detail}/edit"))
+        if can_delete:
+            actions.append(_link("Delete", f"{detail}/delete"))
+        return (
+            f'<tr data-object-id="{_e(object_id)}">{"".join(cells)}'
+            f"<td>{' · '.join(actions)}</td></tr>"
+        )
+
+    def _pagination(self, resource: AdminResource, page: Page, query: ListQuery) -> str:
+        page_count = max(1, math.ceil(page.total / query.limit))
+        current = query.offset // query.limit + 1
+        links = []
+        if current > 1:
+            params = self._query_params(query, page=current - 1)
+            links.append(_link("Previous", f"{_path(self.prefix, resource)}?{urlencode(params)}"))
+        links.append(f"<span>Page {current} of {page_count}</span>")
+        if current < page_count:
+            params = self._query_params(query, page=current + 1)
+            links.append(_link("Next", f"{_path(self.prefix, resource)}?{urlencode(params)}"))
+        return f'<nav aria-label="Pagination">{" · ".join(links)}</nav>'
+
+    @staticmethod
+    def _query_params(query: ListQuery, *, page: int) -> dict[str, str]:
+        params = {"page": str(page)}
+        if query.search:
+            params["q"] = query.search
+        if query.order_by:
+            params["sort"] = query.order_by
+            params["direction"] = "desc" if query.descending else "asc"
+        params.update({f"filter_{name}": value for name, value in query.filters.items()})
+        return params
+
+    def detail(
+        self,
+        resource: AdminResource,
+        record: Record,
+        *,
+        can_change: bool,
+        can_delete: bool,
+    ) -> str:
+        object_id = _record_id(resource, record)
+        entries = "".join(
+            f"<dt>{_e(field.label)}</dt><dd>{_display(_record_value(record, field.name))}</dd>"
+            for field in resource.fields
+        )
+        actions = [_link(f"Back to {resource.label}", _path(self.prefix, resource))]
+        base = _path(self.prefix, resource, "object", object_id)
+        if can_change:
+            actions.append(_link("Edit", f"{base}/edit"))
+        if can_delete:
+            actions.append(_link("Delete", f"{base}/delete"))
+        return (
+            f"<h1>{_e(_record_title(resource, record))}</h1>"
+            f"<dl>{entries}</dl><p>{' · '.join(actions)}</p>"
+        )
+
+    def form(
+        self,
+        resource: AdminResource,
+        *,
+        action: str,
+        heading: str,
+        values: Mapping[str, object],
+        errors: Mapping[str, str],
+        submit_label: str,
+    ) -> str:
+        summary = ""
+        if errors:
+            items = "".join(f"<li>{_e(message)}</li>" for message in errors.values())
+            summary = (
+                '<section role="alert" aria-labelledby="admin-form-errors">'
+                '<h2 id="admin-form-errors">Correct the following errors</h2>'
+                f"<ul>{items}</ul></section>"
+            )
+        controls = "".join(
+            self._field_control(field, values.get(field.name), errors.get(field.name))
+            for field in resource.fields
+        )
+        cancel = _link(f"Cancel and return to {resource.label}", _path(self.prefix, resource))
+        return (
+            f"<h1>{_e(heading)}</h1>{summary}"
+            f'<form method="post" action="{_e(action)}" hx-post="{_e(action)}" '
+            'hx-target="#hayate-admin" hx-select="#hayate-admin" hx-swap="outerHTML">'
+            f'{controls}<button type="submit">{_e(submit_label)}</button></form><p>{cancel}</p>'
+        )
+
+    def _field_control(
+        self,
+        field: AdminField,
+        value: object | None,
+        error: str | None,
+    ) -> str:
+        field_id = f"field-{field.name}"
+        if field.read_only:
+            return (
+                f'<div><span id="{_e(field_id)}">{_e(field.label)}</span>'
+                f'<output aria-labelledby="{_e(field_id)}">{_display(value)}</output></div>'
+            )
+        required = " required" if field.required else ""
+        invalid = ' aria-invalid="true"' if error is not None else ""
+        described = f' aria-describedby="{_e(field_id)}-error"' if error is not None else ""
+        raw = "" if value is None else str(value)
+        if field.kind == "textarea":
+            control = (
+                f'<textarea id="{_e(field_id)}" name="{_e(field.name)}" '
+                f'maxlength="{field.max_length}"{required}{invalid}{described}>'
+                f"{_e(raw)}</textarea>"
+            )
+        elif field.kind == "select":
+            options = []
+            if not field.required:
+                options.append('<option value="">—</option>')
+            options.extend(
+                f'<option value="{_e(choice)}"{" selected" if choice == raw else ""}>'
+                f"{_e(label)}</option>"
+                for choice, label in field.choices
+            )
+            control = (
+                f'<select id="{_e(field_id)}" name="{_e(field.name)}"'
+                f"{required}{invalid}{described}>{''.join(options)}</select>"
+            )
+        elif field.kind == "checkbox":
+            checked = " checked" if bool(value) else ""
+            control = (
+                f'<input id="{_e(field_id)}" name="{_e(field.name)}" '
+                f'type="checkbox" value="true"{checked}{invalid}{described}>'
+            )
+        else:
+            input_type = field.kind if field.kind != "integer" else "number"
+            step = ' step="any"' if field.kind == "number" else ""
+            control = (
+                f'<input id="{_e(field_id)}" name="{_e(field.name)}" '
+                f'type="{_e(input_type)}" value="{_e(raw)}" maxlength="{field.max_length}"'
+                f"{step}{required}{invalid}{described}>"
+            )
+        message = (
+            f'<p id="{_e(field_id)}-error" role="alert">{_e(error)}</p>'
+            if error is not None
+            else ""
+        )
+        return f'<div><label for="{_e(field_id)}">{_e(field.label)}</label>{control}{message}</div>'
+
+    def delete_confirmation(self, resource: AdminResource, record: Record, *, action: str) -> str:
+        object_id = _record_id(resource, record)
+        cancel = _link("Cancel", _path(self.prefix, resource, "object", object_id))
+        return (
+            f"<h1>Delete {_e(_record_title(resource, record))}?</h1>"
+            "<p>This operation cannot be undone by hayate-admin.</p>"
+            f'<form method="post" action="{_e(action)}" hx-post="{_e(action)}">'
+            '<button type="submit">Confirm delete</button></form>'
+            f"<p>{cancel}</p>"
+        )
