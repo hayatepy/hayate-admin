@@ -16,8 +16,8 @@ Measured on 2026-07-27:
 | Wrangler / workerd launcher | `wrangler==4.114.0` |
 | Node.js | `24` in CI; `24.18.0` for the recorded local run |
 | Python Workers interpreter observed by Pywrangler | CPython/Pyodide `3.13.2` |
-| Uncompressed upload | `1099.32 KiB` |
-| Gzip upload | `263.97 KiB` |
+| Uncompressed upload | `1113.11 KiB` |
+| Gzip upload | `265.65 KiB` |
 | Attached modules | 126 |
 
 The size includes candidate wheels for Hayate, hayate-admin, hayate-htmx, and
@@ -36,7 +36,9 @@ AWS, WSGI, package metadata, bytecode, and cache files in the upload.
    D1 calls;
 6. verifies a partial bulk result and per-object operation-tagged audit;
 7. verifies full-page and htmx fragment representations;
-8. reads persistent audit rows and proves that bound/form values are absent.
+8. reads persistent audit rows and proves that bound/form values are absent;
+9. renders separately authorized, paginated object history and repeats the
+   non-disclosure assertion on its HTML.
 
 SQLite list count/results share a native transaction. D1 request factories use
 a `first-primary` session for sequential consistency. The local gate preserves

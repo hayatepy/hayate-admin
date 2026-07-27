@@ -27,6 +27,9 @@ from .contracts import (
     AdminResource,
     AdminValidationError,
     AuditEvent,
+    AuditHistoryPage,
+    AuditHistoryReader,
+    AuditHistoryReaderFactory,
     AuditPhase,
     AuditSink,
     AuditSinkFactory,
@@ -75,6 +78,8 @@ class AdminSite:
         "_audit",
         "_audit_factory",
         "_authorize",
+        "_history",
+        "_history_factory",
         "_registered",
         "_renderer",
         "_resources",
@@ -91,6 +96,8 @@ class AdminSite:
         authorize: Authorizer,
         audit: AuditSink | None = None,
         audit_factory: AuditSinkFactory | None = None,
+        history: AuditHistoryReader | None = None,
+        history_factory: AuditHistoryReaderFactory | None = None,
         prefix: str = "/admin",
         htmx_asset: AdminAsset | None = None,
     ) -> None:
@@ -106,6 +113,12 @@ class AdminSite:
             raise ValueError("admin audit must be callable")
         if audit_factory is not None and not callable(audit_factory):
             raise ValueError("admin audit_factory must be callable")
+        if history is not None and history_factory is not None:
+            raise ValueError("admin accepts at most one history reader or history_factory")
+        if history is not None and not callable(history):
+            raise ValueError("admin history reader must be callable")
+        if history_factory is not None and not callable(history_factory):
+            raise ValueError("admin history_factory must be callable")
         if htmx_asset is not None and not isinstance(htmx_asset, AdminAsset):
             raise ValueError("admin htmx_asset must be an AdminAsset")
         self.title = title
@@ -114,6 +127,8 @@ class AdminSite:
         self._authorize = authorize
         self._audit = audit
         self._audit_factory = audit_factory
+        self._history = history
+        self._history_factory = history_factory
         self._resources: dict[str, AdminResource] = {}
         self._registered = False
         self._renderer = AdminRenderer(prefix=self.prefix, title=title, asset=htmx_asset)
@@ -121,6 +136,10 @@ class AdminSite:
     @property
     def resources(self) -> tuple[AdminResource, ...]:
         return tuple(self._resources.values())
+
+    @property
+    def _has_history(self) -> bool:
+        return self._history is not None or self._history_factory is not None
 
     def add(self, resource: AdminResource) -> AdminResource:
         """Add one resource before the site is registered."""
@@ -173,6 +192,10 @@ class AdminSite:
         @app.post(f"{prefix}/:resource/object/:object_id/edit")
         async def admin_edit(context: Context) -> Response:
             return await self._edit(context)
+
+        @app.get(f"{prefix}/:resource/object/:object_id/history")
+        async def admin_history(context: Context) -> Response:
+            return await self._history_view(context)
 
         @app.get(f"{prefix}/:resource/object/:object_id/delete")
         async def admin_delete_form(context: Context) -> Response:
@@ -337,10 +360,58 @@ class AdminSite:
             is not None,
             can_delete=await self._allowed(context, "resource:delete", resource, object_id)
             is not None,
+            can_history=self._has_history
+            and await self._allowed(context, "resource:history", resource, object_id) is not None,
         )
         return self._renderer.response(
             context,
             title=str(record.get(resource.title_field, object_id)),
+            actor=actor,
+            content=content,
+        )
+
+    async def _history_view(self, context: Context) -> Response:
+        resource = self._resource(context)
+        object_id = self._object_id(context)
+        if resource is None or object_id is None or not self._has_history:
+            return self._not_found()
+        actor = await self._allowed(context, "resource:history", resource, object_id)
+        if actor is None:
+            return self._forbidden()
+        raw_page = context.req.query("page") or "1"
+        try:
+            page_number = int(raw_page)
+        except ValueError:
+            return problem(400, title="Invalid admin history page")
+        if not 1 <= page_number <= 1_000_000:
+            return problem(400, title="Invalid admin history page")
+        limit = 50
+        reader = self._history
+        if reader is None:
+            factory = self._history_factory
+            if factory is None:
+                raise RuntimeError("admin history configuration is missing")
+            reader = factory(context)
+        if not callable(reader):
+            raise TypeError("admin history_factory returned an invalid reader")
+        page = await reader(
+            context,
+            resource,
+            object_id,
+            (page_number - 1) * limit,
+            limit,
+        )
+        self._validate_history_page(resource, object_id, page, limit)
+        content = self._renderer.history(
+            resource,
+            object_id,
+            page,
+            page_number=page_number,
+            limit=limit,
+        )
+        return self._renderer.response(
+            context,
+            title=f"{resource.singular_label} history",
             actor=actor,
             content=content,
         )
@@ -957,6 +1028,22 @@ class AdminSite:
         returned = tuple(result.succeeded) + tuple(result.failed)
         if len(returned) != len(selected) or set(returned) != set(selected):
             raise ValueError("admin bulk action result must partition every selected object")
+
+    @staticmethod
+    def _validate_history_page(
+        resource: AdminResource,
+        object_id: str,
+        page: AuditHistoryPage,
+        limit: int,
+    ) -> None:
+        if not isinstance(page, AuditHistoryPage):
+            raise TypeError("admin history reader returned an invalid page")
+        if len(page.items) > limit:
+            raise ValueError("admin history reader returned more than the requested limit")
+        if any(
+            event.resource != resource.slug or event.object_id != object_id for event in page.items
+        ):
+            raise ValueError("admin history reader returned an event for another object")
 
     @staticmethod
     def _record_id(resource: AdminResource, record: Record) -> str:

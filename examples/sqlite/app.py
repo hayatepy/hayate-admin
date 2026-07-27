@@ -23,7 +23,7 @@ from hayate_admin import (
     AuditEvent,
 )
 
-from ..tasks import TaskRepository, task_resource
+from ..tasks import TaskRepository, audit_history_reader, task_resource
 from . import generated_queries as task_queries
 from .generated_queries import (
     create_admin_audit_event,
@@ -44,6 +44,7 @@ _ACTIONS: Mapping[AdminRole, frozenset[AdminAction]] = {
             "resource:add",
             "resource:change",
             "resource:bulk",
+            "resource:history",
         }
     ),
     "operator": frozenset(
@@ -54,6 +55,7 @@ _ACTIONS: Mapping[AdminRole, frozenset[AdminAction]] = {
             "resource:change",
             "resource:delete",
             "resource:bulk",
+            "resource:history",
         }
     ),
 }
@@ -162,6 +164,7 @@ def create_example(
         allowed_origins={origin},
         authorize=authorize,
         audit=audit,
+        history=audit_history_reader(database, task_queries),
     )
     admin.add(
         task_resource(

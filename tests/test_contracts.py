@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from datetime import UTC, datetime
 
 import pytest
 
@@ -11,6 +12,8 @@ from hayate_admin import (
     AdminField,
     AdminResource,
     AdminValidationError,
+    AuditEvent,
+    AuditHistoryPage,
     BulkActionResult,
     ListQuery,
     Page,
@@ -160,6 +163,19 @@ def test_actor_asset_query_and_page_invariants():
         ListQuery(None, {}, None, False, 0, 101)
     with pytest.raises(ValueError, match="total"):
         Page((), -1)
+    event = AuditEvent(
+        datetime.now(UTC),
+        "success",
+        "resource:change",
+        "items",
+        "1",
+        "operator",
+    )
+    assert AuditHistoryPage((event,), 1).items == (event,)
+    with pytest.raises(ValueError, match="AuditEvent"):
+        AuditHistoryPage((object(),), 1)
+    with pytest.raises(ValueError, match="smaller"):
+        AuditHistoryPage((event,), 0)
 
 
 def test_public_contracts_reject_runtime_type_misconfiguration():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import fields, replace
+from datetime import UTC, datetime
 from urllib.parse import urlencode
 
 import pytest
@@ -16,6 +17,7 @@ from hayate_admin import (
     AdminSite,
     AdminValidationError,
     AuditEvent,
+    AuditHistoryPage,
     BulkActionResult,
     ListQuery,
     Page,
@@ -142,6 +144,8 @@ def make_app(
     *,
     allowed: set[AdminAction] | None = None,
     bulk_actions: tuple[AdminBulkAction, ...] = (),
+    history=None,
+    history_factory=None,
 ):
     permitted = allowed or {
         "site:view",
@@ -150,6 +154,7 @@ def make_app(
         "resource:change",
         "resource:delete",
         "resource:bulk",
+        "resource:history",
     }
     authorization_calls = []
     audit_events: list[AuditEvent] = []
@@ -171,6 +176,8 @@ def make_app(
         allowed_origins={ORIGIN},
         authorize=authorize,
         audit=audit,
+        history=history,
+        history_factory=history_factory,
     )
     site.add(resource(repository, bulk_actions=bulk_actions))
     site.register(app)
@@ -211,6 +218,9 @@ def test_site_configuration_and_registration_fail_closed():
     async def audit(event):
         pass
 
+    async def history(context, resource, object_id, offset, limit):
+        return AuditHistoryPage((), 0)
+
     with pytest.raises(ValueError, match="exactly one audit"):
         AdminSite(title="Admin", allowed_origins={ORIGIN}, authorize=authorize)
     with pytest.raises(ValueError, match="exactly one audit"):
@@ -229,6 +239,15 @@ def test_site_configuration_and_registration_fail_closed():
             allowed_origins={"https://example.com/path"},
             authorize=authorize,
             audit=audit,
+        )
+    with pytest.raises(ValueError, match="at most one history"):
+        AdminSite(
+            title="Admin",
+            allowed_origins={ORIGIN},
+            authorize=authorize,
+            audit=audit,
+            history=history,
+            history_factory=lambda context: history,
         )
 
     site = AdminSite(
@@ -454,6 +473,80 @@ async def test_bulk_action_rejects_unknown_cross_origin_and_incomplete_results()
     assert [event.error_type for event in audit_events[-2:]] == ["ValueError", "ValueError"]
 
 
+async def test_object_history_is_separately_authorized_bounded_and_escaped():
+    repository = MemoryRepository()
+    reader_calls = []
+    occurred_at = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
+
+    async def history(context, admin_resource, object_id, offset, limit):
+        reader_calls.append((admin_resource.slug, object_id, offset, limit))
+        return AuditHistoryPage(
+            (
+                AuditEvent(
+                    occurred_at,
+                    "failure",
+                    "resource:bulk",
+                    "users",
+                    "1",
+                    "<operator>",
+                    "BulkActionFailed",
+                    "close",
+                ),
+            ),
+            1,
+        )
+
+    app, _, _, _ = make_app(repository, history=history)
+    detail = await app.request("/admin/users/object/1")
+    assert ">History</a>" in await response_text(detail)
+
+    response = await app.request("/admin/users/object/1/history")
+    body = await response_text(response)
+    assert response.status == 200
+    assert "resource:bulk / close" in body
+    assert "&lt;operator&gt;" in body
+    assert "<operator>" not in body
+    assert "BulkActionFailed" in body
+    assert "submitted values are not recorded" in body
+    assert reader_calls == [("users", "1", 0, 50)]
+
+    invalid_page = await app.request("/admin/users/object/1/history?page=0")
+    assert invalid_page.status == 400
+    assert len(reader_calls) == 1
+
+    denied_app, _, _, _ = make_app(
+        repository,
+        allowed={"site:view", "resource:view"},
+        history=history,
+    )
+    denied = await denied_app.request("/admin/users/object/1/history")
+    assert denied.status == 403
+    assert len(reader_calls) == 1
+
+
+async def test_object_history_rejects_cross_object_reader_results():
+    repository = MemoryRepository()
+
+    async def mismatched(context, admin_resource, object_id, offset, limit):
+        return AuditHistoryPage(
+            (
+                AuditEvent(
+                    datetime.now(UTC),
+                    "success",
+                    "resource:change",
+                    "users",
+                    "2",
+                    "operator",
+                ),
+            ),
+            1,
+        )
+
+    app, _, _, _ = make_app(repository, history=mismatched)
+    response = await app.request("/admin/users/object/1/history")
+    assert response.status == 500
+
+
 async def test_htmx_list_returns_only_the_fragment_and_complete_vary():
     repository = MemoryRepository()
     app, _, _, _ = make_app(repository)
@@ -662,11 +755,12 @@ async def test_attempt_audit_failure_stops_mutation_before_storage():
     assert repository.created == []
 
 
-async def test_request_scoped_repository_and_audit_factories_use_context_bindings():
+async def test_request_scoped_repository_audit_and_history_factories_use_context_bindings():
     repository = MemoryRepository()
     binding = object()
     repository_bindings = []
     audit_bindings = []
+    history_bindings = []
     audit_events: list[AuditEvent] = []
 
     async def authorize(context, action, admin_resource, object_id):
@@ -684,12 +778,21 @@ async def test_request_scoped_repository_and_audit_factories_use_context_binding
 
         return audit
 
+    def history_factory(context):
+        history_bindings.append(context.env["database"])
+
+        async def history(context, admin_resource, object_id, offset, limit):
+            return AuditHistoryPage((), 0)
+
+        return history
+
     app = Hayate(env={"database": binding})
     site = AdminSite(
         title="Operations",
         allowed_origins={ORIGIN},
         authorize=authorize,
         audit_factory=audit_factory,
+        history_factory=history_factory,
     )
     site.add(replace(resource(repository), repository=repository_factory))
     site.register(app)
@@ -703,8 +806,11 @@ async def test_request_scoped_repository_and_audit_factories_use_context_binding
         body=valid_form(),
     )
     assert created.status == 303
+    history = await app.request("/admin/users/object/3/history")
+    assert history.status == 200
     assert repository_bindings == [binding, binding]
     assert audit_bindings == [binding, binding]
+    assert history_bindings == [binding]
     assert [event.phase for event in audit_events] == ["attempt", "success"]
 
 

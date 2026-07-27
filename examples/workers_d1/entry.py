@@ -14,6 +14,7 @@ from hayate_admin import (
     AdminResource,
     AdminSite,
     AuditEvent,
+    AuditHistoryReader,
     AuditSink,
 )
 
@@ -32,6 +33,7 @@ else:
 
 TaskRepository = tasks.TaskRepository
 task_resource = tasks.task_resource
+audit_history_reader = tasks.audit_history_reader
 
 _ORIGIN = "http://127.0.0.1:8796"
 _ROLE_ACTIONS: dict[str, frozenset[AdminAction]] = {
@@ -44,6 +46,7 @@ _ROLE_ACTIONS: dict[str, frozenset[AdminAction]] = {
             "resource:change",
             "resource:delete",
             "resource:bulk",
+            "resource:history",
         }
     ),
 }
@@ -76,6 +79,10 @@ def audit_factory(context: Context) -> AuditSink:
     return audit
 
 
+def history_factory(context: Context) -> AuditHistoryReader:
+    return audit_history_reader(_database(context), task_queries)
+
+
 async def authorize(
     context: Context,
     action: AdminAction,
@@ -96,6 +103,7 @@ admin = AdminSite(
     allowed_origins={_ORIGIN},
     authorize=authorize,
     audit_factory=audit_factory,
+    history_factory=history_factory,
 )
 admin.add(task_resource(repository_factory))
 admin.register(app)

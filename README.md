@@ -10,7 +10,7 @@ checked SQL rather than ORM or database reflection.
 > **Status: pre-release.** The typed CRUD and security core is implemented.
 > The SQLite/generated-SQL, browser, and native Workers/D1 reference paths are
 > implemented. General Django admin parity is not claimed:
-> relationships/inlines and object history remain explicit Phase 2 gaps.
+> relationships/inlines remain an explicit Phase 2 gap.
 
 `hayate-admin` is an internal management tool for trusted operators. Public,
 process-centric customer workflows should remain purpose-built application
@@ -152,12 +152,14 @@ Read [the threat model](docs/SECURITY.md) before deploying.
 - delete confirmation;
 - allowlisted bulk actions with bounded selection, per-object authorization,
   explicit partial results, and operation-tagged audit evidence;
+- separately authorized, paginated per-object history backed only by redacted
+  audit events;
 - full-page and htmx fragment representations;
 - ordinary `303` post/redirect/get and htmx `HX-Redirect`;
 - application-injected authorization and redacted audit events.
 
-Relationships/autocomplete, saved filters, object history, and
-internationalization remain tracked Phase 2 work.
+Relationships/autocomplete, saved filters, and internationalization remain
+tracked Phase 2 work.
 
 ## Executable SQLite reference
 
@@ -169,8 +171,8 @@ the complete minimal integration for the initial package contract.
 
 The [Workers/D1 gate](examples/workers_d1/README.md) packages the exact same
 resource and generated query facade into workerd. It exercises the full
-authorization, mutation, CRUD, bulk, escaping, audit, page, and fragment
-contract without ASGI.
+authorization, mutation, CRUD, bulk, object-history, escaping, audit, page,
+and fragment contract without ASGI.
 
 ## Development
 

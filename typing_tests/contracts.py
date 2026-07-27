@@ -8,6 +8,10 @@ from hayate import Context
 from hayate_admin import (
     AdminRepository,
     AdminRepositoryFactory,
+    AdminResource,
+    AuditHistoryPage,
+    AuditHistoryReader,
+    AuditHistoryReaderFactory,
     BulkActionHandler,
     BulkActionResult,
     ListQuery,
@@ -58,3 +62,25 @@ async def bulk_handler(
 
 handler: BulkActionHandler = bulk_handler
 assert_type(handler, BulkActionHandler)
+
+
+async def history_reader(
+    context: Context,
+    resource: AdminResource,
+    object_id: str,
+    offset: int,
+    limit: int,
+) -> AuditHistoryPage:
+    return AuditHistoryPage((), 0)
+
+
+reader: AuditHistoryReader = history_reader
+assert_type(reader, AuditHistoryReader)
+
+
+def history_factory(context: Context) -> AuditHistoryReader:
+    return history_reader
+
+
+reader_factory: AuditHistoryReaderFactory = history_factory
+assert_type(reader_factory, AuditHistoryReaderFactory)
