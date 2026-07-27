@@ -16,6 +16,9 @@ from hayate_admin import (
     AuditHistoryReaderFactory,
     BulkActionHandler,
     BulkActionResult,
+    CsvExportHandler,
+    CursorPage,
+    ExportQuery,
     InlineCollection,
     InlineMutation,
     InlineMutationResult,
@@ -74,6 +77,43 @@ async def bulk_handler(
 
 handler: BulkActionHandler = bulk_handler
 assert_type(handler, BulkActionHandler)
+
+
+async def csv_export(
+    context: Context,
+    repository: AdminRepository,
+    query: ExportQuery,
+) -> tuple[Mapping[str, object], ...]:
+    return ()
+
+
+export_handler: CsvExportHandler = csv_export
+assert_type(export_handler, CsvExportHandler)
+
+
+class CursorRepository:
+    async def list(self, query: ListQuery) -> CursorPage:
+        return CursorPage((), None)
+
+    async def get(self, object_id: str) -> Mapping[str, object] | None:
+        return None
+
+    async def create(self, values: Mapping[str, object]) -> Mapping[str, object]:
+        return {"id": "1"}
+
+    async def update(
+        self,
+        object_id: str,
+        values: Mapping[str, object],
+    ) -> Mapping[str, object] | None:
+        return None
+
+    async def delete(self, object_id: str) -> bool:
+        return False
+
+
+cursor_repository: AdminRepository = CursorRepository()
+assert_type(cursor_repository, AdminRepository)
 
 
 async def history_reader(

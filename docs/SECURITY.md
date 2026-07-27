@@ -19,6 +19,11 @@ Bulk POSTs require `resource:bulk`, the action's declared change/delete
 permission at resource scope, and that permission again for every selected
 object ID. Any denial stops the entire callback before storage runs.
 
+CSV GETs require the separate `resource:export` action at resource scope and
+again for every returned object ID. Grant export more narrowly than ordinary
+viewing when records contain operationally sensitive fields. Cross-site Fetch
+Metadata is rejected before the export callback runs.
+
 Relationship choices require permission for the target resource and for each
 returned target object. A submitted relationship ID is resolved again through
 the application callback in the current request/tenant scope and authorized as
@@ -63,6 +68,21 @@ Generated hayate-sql functions are the recommended boundary. Transactions,
 optimistic concurrency, referential integrity, and row-level authorization
 remain repository responsibilities.
 
+Saved views contain only resource-validated search, choice filters, sort field,
+and direction. They are not storage queries or authorization rules. A caller
+may override a saved view only through the same ordinary allowlisted controls.
+
+Cursor resources receive a repository continuation through `ListQuery.cursor`
+and return another through `CursorPage`. The site envelopes that continuation
+with the resource and a SHA-256 fingerprint of normalized query controls, then
+rejects malformed, cross-resource, and cross-query reuse without duplicating
+those values in the token. The envelope is deliberately not an authorization
+credential: repositories must validate their own cursor version, shape, sort
+mode, and keyset values, and every returned record is still authorized. Raise
+`AdminCursorError` for an unsupported continuation so the site returns a
+generic 400 without reflecting parser details. Never put SQL, secrets, tenant
+identifiers, or unsigned permission claims in a cursor.
+
 Relationship search and resolution callbacks must query only the current
 tenant or account. Search returns a bounded `RelationshipPage`; resolution
 returns one `RelationshipChoice` or `None`. List/detail repositories must
@@ -86,6 +106,15 @@ deduplicated tuple of at most 100 already-authorized IDs. They must return a
 `BulkActionResult` that partitions every ID into success or failure. The
 repository owns all-or-nothing versus partial transaction semantics; failure
 messages must not contain secrets or submitted record values.
+
+CSV callbacks receive only the request context, resolved repository, and an
+`ExportQuery` made from the same allowlisted controls. They must use a static
+checked statement and obey the supplied limit. The site rejects a result above
+`max_rows`, authorizes every record, serializes only configured fields,
+neutralizes spreadsheet formula prefixes, and rejects output above
+`max_bytes`. Exported values are intentionally sensitive application data even
+though audit events remain value-free; protect downloaded files and review the
+field allowlist independently from list display.
 
 Cloudflare D1 and similar runtime bindings exist only on the request context.
 Use an `AdminRepositoryFactory` to resolve the repository from that context;
@@ -131,6 +160,10 @@ than ordinary record viewing when appropriate.
 - inline collection: complete and at most 100 records, with a configurable
   lower per-inline maximum;
 - selected bulk IDs: 100, or the action's lower declared limit;
+- repository cursor: 1,536 URL-safe characters inside a 4,096-character
+  URL-safe, resource/query-bound envelope;
+- CSV export: configured at 1–10,000 rows and 1 KiB–10 MiB, with the callback
+  asked for one extra row to detect truncation;
 - object history: 50 events per page;
 - page number: 1–1,000,000;
 - repository result: no more than the requested page.

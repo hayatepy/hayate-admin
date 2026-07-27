@@ -9,14 +9,18 @@ from hayate_admin import (
     Actor,
     AdminAsset,
     AdminBulkAction,
+    AdminCsvExport,
     AdminField,
     AdminInline,
     AdminRelationship,
     AdminResource,
+    AdminSavedView,
     AdminValidationError,
     AuditEvent,
     AuditHistoryPage,
     BulkActionResult,
+    CursorPage,
+    ExportQuery,
     InlineCollection,
     InlineMutation,
     InlineMutationResult,
@@ -274,6 +278,11 @@ def test_actor_asset_query_and_page_invariants():
         ListQuery(None, {}, None, False, 0, 101)
     with pytest.raises(ValueError, match="total"):
         Page((), -1)
+    assert CursorPage(({"id": "1"},), "next").next_cursor == "next"
+    with pytest.raises(ValueError, match="next cursor"):
+        CursorPage((), "")
+    with pytest.raises(ValueError, match="cannot include an offset"):
+        ListQuery(None, {}, None, False, 1, 10, cursor="next")
     event = AuditEvent(
         datetime.now(UTC),
         "success",
@@ -287,6 +296,97 @@ def test_actor_asset_query_and_page_invariants():
         AuditHistoryPage((object(),), 1)
     with pytest.raises(ValueError, match="smaller"):
         AuditHistoryPage((event,), 0)
+
+
+def test_saved_view_cursor_and_csv_contracts_are_explicit_and_bounded():
+    async def export(context, repository, query):
+        return ()
+
+    repository = EmptyRepository()
+    fields = (
+        AdminField("id", "ID", required=False, read_only=True, sortable=True),
+        AdminField("name", "Name", searchable=True),
+        AdminField(
+            "status",
+            "Status",
+            kind="select",
+            choices=(("open", "Open"), ("closed", "Closed")),
+            filterable=True,
+        ),
+    )
+    view = AdminSavedView(
+        "closed",
+        "Closed",
+        search="incident",
+        filters={"status": "closed"},
+        order_by="id",
+        descending=True,
+    )
+    policy = AdminCsvExport(
+        ("id", "name"),
+        export,
+        filename="items.csv",
+        max_rows=50,
+        max_bytes=2048,
+    )
+    configured = AdminResource(
+        "items",
+        "Items",
+        "Item",
+        fields,
+        repository,
+        pagination="cursor",
+        saved_views=(view,),
+        csv_export=policy,
+    )
+    assert configured.saved_view_map["closed"] is view
+    assert configured.csv_export is policy
+    assert ExportQuery("incident", {"status": "closed"}, "id", True, 51, "closed").limit == 51
+
+    with pytest.raises(ValueError, match="saved view slug"):
+        AdminSavedView("Bad", "Bad")
+    with pytest.raises(ValueError, match="descending requires"):
+        AdminSavedView("bad", "Bad", descending=True)
+    with pytest.raises(ValueError, match="saved filters"):
+        AdminResource(
+            "items",
+            "Items",
+            "Item",
+            fields,
+            repository,
+            saved_views=(AdminSavedView("bad", "Bad", filters={"status": "missing"}),),
+        )
+    with pytest.raises(ValueError, match="saved sort"):
+        AdminResource(
+            "items",
+            "Items",
+            "Item",
+            fields,
+            repository,
+            saved_views=(AdminSavedView("bad", "Bad", order_by="name"),),
+        )
+    with pytest.raises(ValueError, match="CSV export fields"):
+        AdminResource(
+            "items",
+            "Items",
+            "Item",
+            fields,
+            repository,
+            csv_export=AdminCsvExport(("secret",), export),
+        )
+    with pytest.raises(ValueError, match="filename"):
+        AdminCsvExport(("id",), export, filename="../../items.csv")
+    with pytest.raises(ValueError, match="max_rows"):
+        AdminCsvExport(("id",), export, max_rows=10_001)
+    with pytest.raises(ValueError, match="pagination"):
+        AdminResource(
+            "items",
+            "Items",
+            "Item",
+            fields,
+            repository,
+            pagination="unknown",
+        )
 
 
 def test_public_contracts_reject_runtime_type_misconfiguration():

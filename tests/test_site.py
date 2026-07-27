@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import json
+import re
 from collections.abc import Mapping
 from dataclasses import fields, replace
 from datetime import UTC, datetime
@@ -12,15 +15,20 @@ from hayate_admin import (
     Actor,
     AdminAction,
     AdminBulkAction,
+    AdminCsvExport,
+    AdminCursorError,
     AdminField,
     AdminInline,
     AdminRelationship,
     AdminResource,
+    AdminSavedView,
     AdminSite,
     AdminValidationError,
     AuditEvent,
     AuditHistoryPage,
     BulkActionResult,
+    CursorPage,
+    ExportQuery,
     InlineCollection,
     InlineMutationResult,
     ListQuery,
@@ -102,10 +110,39 @@ class MemoryRepository:
         return self.records.pop(object_id, None) is not None
 
 
+class CursorMemoryRepository(MemoryRepository):
+    async def list(self, query: ListQuery) -> CursorPage:
+        self.queries.append(query)
+        records = list(self.records.values())
+        if query.search:
+            needle = query.search.casefold()
+            records = [
+                record
+                for record in records
+                if needle in str(record["name"]).casefold()
+                or needle in str(record["email"]).casefold()
+            ]
+        for name, value in query.filters.items():
+            records = [record for record in records if str(record[name]) == value]
+        if query.order_by:
+            records.sort(key=lambda record: str(record[query.order_by]), reverse=query.descending)
+        try:
+            start = 0 if query.cursor is None else int(query.cursor)
+        except ValueError as error:
+            raise AdminCursorError from error
+        items = records[start : start + query.limit]
+        next_offset = start + len(items)
+        next_cursor = None if next_offset >= len(records) else str(next_offset)
+        return CursorPage(items, next_cursor)
+
+
 def resource(
     repository: MemoryRepository,
     *,
     bulk_actions: tuple[AdminBulkAction, ...] = (),
+    pagination: str = "offset",
+    saved_views: tuple[AdminSavedView, ...] = (),
+    csv_export: AdminCsvExport | None = None,
 ) -> AdminResource:
     return AdminResource(
         "users",
@@ -142,6 +179,9 @@ def resource(
         bulk_actions=bulk_actions,
         title_field="name",
         page_size=1,
+        pagination=pagination,
+        saved_views=saved_views,
+        csv_export=csv_export,
     )
 
 
@@ -152,6 +192,10 @@ def make_app(
     bulk_actions: tuple[AdminBulkAction, ...] = (),
     history=None,
     history_factory=None,
+    pagination: str = "offset",
+    saved_views: tuple[AdminSavedView, ...] = (),
+    csv_export: AdminCsvExport | None = None,
+    denied_export_ids: frozenset[str] = frozenset(),
 ):
     permitted = allowed or {
         "site:view",
@@ -160,6 +204,7 @@ def make_app(
         "resource:change",
         "resource:delete",
         "resource:bulk",
+        "resource:export",
         "resource:history",
     }
     authorization_calls = []
@@ -170,6 +215,8 @@ def make_app(
             (action, None if admin_resource is None else admin_resource.slug)
         )
         if action not in permitted:
+            return None
+        if action == "resource:export" and object_id in denied_export_ids:
             return None
         return Actor("operator-1", "Operator <One>")
 
@@ -185,7 +232,15 @@ def make_app(
         history=history,
         history_factory=history_factory,
     )
-    site.add(resource(repository, bulk_actions=bulk_actions))
+    site.add(
+        resource(
+            repository,
+            bulk_actions=bulk_actions,
+            pagination=pagination,
+            saved_views=saved_views,
+            csv_export=csv_export,
+        )
+    )
     site.register(app)
     return app, site, authorization_calls, audit_events
 
@@ -307,6 +362,218 @@ async def test_list_query_is_allowlisted_bounded_and_safely_escaped():
     )
     assert repository.queries[-1].order_by is None
     assert repository.queries[-1].filters == {}
+
+
+async def test_saved_views_apply_only_registered_allowlisted_controls():
+    repository = MemoryRepository()
+    saved_view = AdminSavedView(
+        "closed-by-name",
+        "Closed by name",
+        filters={"status": "closed"},
+        order_by="name",
+    )
+    app, _, _, _ = make_app(repository, saved_views=(saved_view,))
+
+    response = await app.request("/admin/users?view=closed-by-name")
+    body = await response_text(response)
+    assert response.status == 200
+    assert "Second" in body
+    assert "<script>alert(1)</script>" not in body
+    assert 'aria-label="Saved views"' in body
+    assert 'aria-current="page"' in body
+    assert 'type="hidden" name="view" value="closed-by-name"' in body
+    assert repository.queries[-1] == ListQuery(
+        search=None,
+        filters={"status": "closed"},
+        order_by="name",
+        descending=False,
+        offset=0,
+        limit=1,
+        saved_view="closed-by-name",
+    )
+
+    overridden = await app.request("/admin/users?view=closed-by-name&filter_status=open")
+    assert overridden.status == 200
+    assert repository.queries[-1].filters == {"status": "open"}
+
+    fragment = await app.request(
+        "/admin/users?view=closed-by-name",
+        headers={"hx-request": "true"},
+    )
+    fragment_body = await response_text(fragment)
+    assert fragment.status == 200
+    assert fragment_body.startswith('<main id="hayate-admin"')
+    assert "<!doctype html>" not in fragment_body
+
+    calls = len(repository.queries)
+    unknown = await app.request("/admin/users?view=unregistered")
+    assert unknown.status == 400
+    assert len(repository.queries) == calls
+
+
+async def test_cursor_pagination_is_opaque_query_bound_and_forward_only():
+    repository = CursorMemoryRepository()
+    app, _, _, _ = make_app(repository, pagination="cursor")
+
+    first = await app.request("/admin/users")
+    first_body = await response_text(first)
+    assert first.status == 200
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in first_body
+    assert 'aria-label="Cursor pagination"' in first_body
+    match = re.search(r"[?&]cursor=([A-Za-z0-9_-]+)", first_body)
+    assert match is not None
+    token = match.group(1)
+    assert token != "1"
+
+    second = await app.request(f"/admin/users?cursor={token}")
+    second_body = await response_text(second)
+    assert second.status == 200
+    assert "Second" in second_body
+    assert repository.queries[-1].cursor == "1"
+    assert "End of results" in second_body
+    assert ">First</a>" in second_body
+
+    cross_query = await app.request(f"/admin/users?cursor={token}&q=Second")
+    assert cross_query.status == 400
+    offset = await app.request("/admin/users?page=2")
+    assert offset.status == 400
+    malformed = await app.request("/admin/users?cursor=not%2Ba%2Ftoken")
+    assert malformed.status == 400
+
+    padding = "=" * (-len(token) % 4)
+    payload = json.loads(base64.urlsafe_b64decode(token + padding))
+    payload["r"] = "accounts"
+    cross_resource_token = (
+        base64.urlsafe_b64encode(
+            json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+        )
+        .rstrip(b"=")
+        .decode()
+    )
+    cross_resource = await app.request(f"/admin/users?cursor={cross_resource_token}")
+    assert cross_resource.status == 400
+
+    payload["r"] = "users"
+    payload["c"] = "unsupported"
+    unsupported_token = (
+        base64.urlsafe_b64encode(
+            json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+        )
+        .rstrip(b"=")
+        .decode()
+    )
+    unsupported = await app.request(f"/admin/users?cursor={unsupported_token}")
+    assert unsupported.status == 400
+    oversized = await app.request(f"/admin/users?cursor={'a' * 4097}")
+    assert oversized.status == 400
+
+
+async def test_csv_export_is_separately_authorized_bounded_and_spreadsheet_safe():
+    repository = MemoryRepository()
+    repository.records["1"]["name"] = "=2+2"
+    queries: list[ExportQuery] = []
+
+    async def export(context, admin_repository, query):
+        assert admin_repository is repository
+        queries.append(query)
+        return tuple(repository.records.values())
+
+    policy = AdminCsvExport(
+        ("name", "status"),
+        export,
+        filename="users.csv",
+        max_rows=2,
+        max_bytes=2048,
+    )
+    app, _, _, audit_events = make_app(repository, csv_export=policy)
+
+    listing = await app.request("/admin/users?filter_status=open")
+    listing_body = await response_text(listing)
+    assert 'href="/admin/users/export.csv?filter_status=open"' in listing_body
+    assert 'hx-get="/admin/users/export.csv' not in listing_body
+
+    response = await app.request("/admin/users/export.csv?sort=name&direction=desc")
+    body = await response_text(response)
+    assert response.status == 200
+    assert response.headers.get("content-type") == "text/csv; charset=utf-8"
+    assert response.headers.get("content-disposition") == 'attachment; filename="users.csv"'
+    assert body.splitlines()[0] == "Name,Status"
+    assert "'=2+2" in body
+    assert "first@example.com" not in body
+    assert queries == [ExportQuery(None, {}, "name", True, 3)]
+    assert [
+        (event.phase, event.action, event.operation, event.object_id) for event in audit_events
+    ] == [
+        ("attempt", "resource:export", "csv", None),
+        ("success", "resource:export", "csv", None),
+    ]
+    assert "=2+2" not in repr(audit_events)
+    cross_site = await app.request(
+        "/admin/users/export.csv",
+        headers={"sec-fetch-site": "cross-site"},
+    )
+    assert cross_site.status == 403
+    assert audit_events[-1].error_type == "CrossSiteRequest"
+
+    denied_app, _, _, denied_events = make_app(
+        repository,
+        allowed={"site:view", "resource:view"},
+        csv_export=policy,
+    )
+    denied = await denied_app.request("/admin/users/export.csv")
+    assert denied.status == 403
+    assert denied_events[-1].error_type == "AuthorizationDenied"
+
+    object_denied_app, _, _, object_denied_events = make_app(
+        repository,
+        csv_export=policy,
+        denied_export_ids=frozenset({"2"}),
+    )
+    object_denied = await object_denied_app.request("/admin/users/export.csv")
+    assert object_denied.status == 403
+    assert object_denied_events[-1].object_id == "2"
+    assert object_denied_events[-1].error_type == "AuthorizationDenied"
+
+
+async def test_csv_export_rejects_page_controls_row_overflow_and_byte_overflow():
+    repository = MemoryRepository()
+
+    async def export(context, admin_repository, query):
+        return tuple(repository.records.values())
+
+    row_policy = AdminCsvExport(
+        ("name",),
+        export,
+        max_rows=1,
+        max_bytes=2048,
+    )
+    app, _, _, audit_events = make_app(repository, csv_export=row_policy)
+    invalid_query = await app.request("/admin/users/export.csv?page=1")
+    assert invalid_query.status == 400
+    row_overflow = await app.request("/admin/users/export.csv")
+    assert row_overflow.status == 413
+    assert audit_events[-1].error_type == "ExportRowLimitExceeded"
+
+    repository.records = {
+        "1": {
+            "id": "1",
+            "name": "x" * 2000,
+            "email": "first@example.com",
+            "status": "open",
+            "active": True,
+            "notes": "",
+        }
+    }
+    byte_policy = AdminCsvExport(
+        ("name",),
+        export,
+        max_rows=1,
+        max_bytes=1024,
+    )
+    byte_app, _, _, byte_events = make_app(repository, csv_export=byte_policy)
+    byte_overflow = await byte_app.request("/admin/users/export.csv")
+    assert byte_overflow.status == 413
+    assert byte_events[-1].error_type == "ExportByteLimitExceeded"
 
 
 async def test_bulk_action_is_explicit_bounded_and_audited_per_object():

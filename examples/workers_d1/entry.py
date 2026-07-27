@@ -47,6 +47,7 @@ _ROLE_ACTIONS: dict[str, frozenset[AdminAction]] = {
             "resource:change",
             "resource:delete",
             "resource:bulk",
+            "resource:export",
             "resource:history",
         }
     ),
@@ -77,11 +78,11 @@ def audit_factory(context: Context) -> AuditSink:
             occurred_at=event.occurred_at.isoformat(),
             phase=event.phase,
             action=event.action,
-            operation=event.operation,
+            operation=event.operation or "",
             resource=event.resource or "site",
-            object_id=event.object_id,
-            actor_id=event.actor_id,
-            error_type=event.error_type,
+            object_id=event.object_id or "",
+            actor_id=event.actor_id or "",
+            error_type=event.error_type or "",
         )
 
     return audit

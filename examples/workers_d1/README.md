@@ -6,7 +6,7 @@ There is no ASGI server, ASGI adapter, WSGI bridge, ORM, or SQL builder.
 
 ## Pinned profile
 
-Measured on 2026-07-27:
+Measured on 2026-07-28:
 
 | Component | Exact profile |
 |---|---|
@@ -16,8 +16,8 @@ Measured on 2026-07-27:
 | Wrangler / workerd launcher | `wrangler==4.114.0` |
 | Node.js | `24` in CI; `24.18.0` for the recorded local run |
 | Python Workers interpreter observed by Pywrangler | CPython/Pyodide `3.13.2` |
-| Uncompressed upload | `1195.16 KiB` |
-| Gzip upload | `275.64 KiB` |
+| Uncompressed upload | `1232.30 KiB` |
+| Gzip upload | `281.56 KiB` |
 
 The size includes candidate wheels for Hayate, hayate-admin, hayate-htmx, and
 hayate-sql plus Jinja and Workers runtime support. The script rejects ASGI,
@@ -38,9 +38,13 @@ AWS, WSGI, package metadata, bytecode, and cache files in the upload.
 7. creates, updates, and deletes bounded inline children while rejecting a
    cross-tenant child-ID substitution before storage;
 8. verifies a partial bulk result and per-object operation-tagged audit;
-9. verifies full-page and htmx fragment representations;
-10. reads persistent audit rows and proves that bound/form values are absent;
-11. renders separately authorized, paginated object history and repeats the
+9. traverses a composite keyset cursor, applies a saved view, and rejects
+   cross-tenant records;
+10. downloads a separately authorized, field-allowlisted CSV and proves notes
+    and another tenant's row are absent;
+11. verifies full-page and htmx fragment representations;
+12. reads persistent audit rows and proves that bound/form values are absent;
+13. renders separately authorized, paginated object history and repeats the
    non-disclosure assertion on its HTML.
 
 SQLite list count/results share a native transaction. D1 request factories use
