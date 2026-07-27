@@ -58,7 +58,7 @@ view or place the app behind an identity-aware proxy.
 Roles are deliberately not self-asserted:
 
 - `viewer` can view the site and resources;
-- `editor` can also add and change records;
+- `editor` can also add, change, and run the declared close bulk action;
 - `operator` can also delete records.
 
 The public auth API cannot write `admin_role`. Provision roles through a
@@ -68,12 +68,13 @@ expose the example seeding command to application users.
 ## Audit boundary
 
 Every mutation writes an `admin_audit_event` using another generated query.
-Rows contain time, phase, action, resource, object ID, actor ID, and error type.
-They have no form-value, record-snapshot, SQL, cookie, or token column.
+Rows contain time, phase, action, optional registered operation slug, resource,
+object ID, actor ID, and error type. They have no form-value, record-snapshot,
+SQL, cookie, or token column.
 
 The real-browser gate signs in through hayate-auth, creates two records,
-searches, filters, sorts, edits, deletes, checks browser errors, and verifies
-the audit rows:
+selects and bulk-closes one, searches, filters, sorts, edits, deletes, checks
+browser errors, and verifies the audit rows:
 
 ```sh
 uv run playwright install chromium

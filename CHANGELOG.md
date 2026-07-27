@@ -19,3 +19,6 @@ All notable changes to hayate-admin are documented here.
 - Add request-scoped repository and audit factories plus a pinned native
   Workers/D1 gate that reuses the same resource and generated query facade
   without ASGI.
+- Add explicit bounded bulk actions with resource and per-object authorization,
+  complete partial-result contracts, accessible controls, and operation-tagged
+  redacted audit evidence on SQLite, Chromium, and native D1.

@@ -137,14 +137,21 @@ async def test_real_browser_create_search_filter_sort_edit_delete(
         await expect(rows).to_have_count(2)
         await expect(rows.nth(0)).to_contain_text("Alpha task")
 
+        await page.get_by_label("Select Zulu task").check()
+        await page.get_by_label("Action").select_option("close")
+        await page.get_by_role("button", name="Apply to selected").click()
+        await expect(page.get_by_role("heading", name="Close selected")).to_be_visible()
+        await expect(page.get_by_role("status")).to_contain_text("1 completed; 0 failed.")
+        await page.get_by_role("link", name="Return to Tasks").click()
+
         await page.get_by_label("Search").fill("Zulu")
-        await page.get_by_role("button", name="Apply").click()
+        await page.get_by_role("button", name="Apply", exact=True).click()
         await expect(page.locator("tbody tr")).to_have_count(1)
         await expect(page.locator("tbody tr")).to_contain_text("Zulu task")
 
-        await page.get_by_label("Search").fill("")
+        await page.get_by_label("Search").fill("Alpha")
         await page.get_by_label("Status").select_option("closed")
-        await page.get_by_role("button", name="Apply").click()
+        await page.get_by_role("button", name="Apply", exact=True).click()
         await expect(page.locator("tbody tr")).to_have_count(1)
         await expect(page.locator("tbody tr")).to_contain_text("Alpha task")
 
@@ -170,7 +177,8 @@ async def test_real_browser_create_search_filter_sort_edit_delete(
         events = await list_admin_audit_events(database)
     finally:
         await database.close()
-    assert [event["phase"] for event in events].count("success") == 4
+    assert [event["phase"] for event in events].count("success") == 5
+    assert sum(event["operation"] == "close" for event in events) == 2
     assert "Zulu task" not in repr(events)
     assert "Alpha task" not in repr(events)
     assert "Beta task" not in repr(events)

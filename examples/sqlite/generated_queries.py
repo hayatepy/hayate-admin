@@ -12,6 +12,35 @@ from hayate_sql import (
 )
 
 
+class CloseTaskRow(TypedDict):
+    id: int
+
+
+CLOSE_TASK_QUERY = Query(
+    name="close_task",
+    sql=("UPDATE task\nSET status = 'closed'\nWHERE id = ?1\nRETURNING id"),
+    cardinality=Cardinality.MAYBE_ONE,
+    parameters=(Parameter("id", "int"),),
+    columns=(Column("id", "int"),),
+    timeout_ms=None,
+)
+
+
+async def close_task(
+    db: Database,
+    /,
+    *,
+    id: int,
+) -> CloseTaskRow | None:
+    return cast(
+        "CloseTaskRow | None",
+        await db.run(
+            CLOSE_TASK_QUERY,
+            id=id,
+        ),
+    )
+
+
 class CountTasksRow(TypedDict):
     total: int
 
@@ -58,18 +87,20 @@ CREATE_ADMIN_AUDIT_EVENT_QUERY = Query(
         "    occurred_at,\n"
         "    phase,\n"
         "    action,\n"
+        "    operation,\n"
         "    resource,\n"
         "    object_id,\n"
         "    actor_id,\n"
         "    error_type\n"
         ")\n"
-        "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+        "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
     ),
     cardinality=Cardinality.EXEC,
     parameters=(
         Parameter("occurred_at", "str"),
         Parameter("phase", "str"),
         Parameter("action", "str"),
+        Parameter("operation", "str?"),
         Parameter("resource", "str"),
         Parameter("object_id", "str?"),
         Parameter("actor_id", "str?"),
@@ -87,6 +118,7 @@ async def create_admin_audit_event(
     occurred_at: str,
     phase: str,
     action: str,
+    operation: str | None,
     resource: str,
     object_id: str | None,
     actor_id: str | None,
@@ -99,6 +131,7 @@ async def create_admin_audit_event(
             occurred_at=occurred_at,
             phase=phase,
             action=action,
+            operation=operation,
             resource=resource,
             object_id=object_id,
             actor_id=actor_id,
@@ -263,6 +296,7 @@ class ListAdminAuditEventsRow(TypedDict):
     occurred_at: str
     phase: str
     action: str
+    operation: str | None
     resource: str
     object_id: str | None
     actor_id: str | None
@@ -272,7 +306,8 @@ class ListAdminAuditEventsRow(TypedDict):
 LIST_ADMIN_AUDIT_EVENTS_QUERY = Query(
     name="list_admin_audit_events",
     sql=(
-        "SELECT id, occurred_at, phase, action, resource, object_id, actor_id, error_type\n"
+        "SELECT id, occurred_at, phase, action, operation,\n"
+        "       resource, object_id, actor_id, error_type\n"
         "FROM admin_audit_event\n"
         "ORDER BY id"
     ),
@@ -283,6 +318,7 @@ LIST_ADMIN_AUDIT_EVENTS_QUERY = Query(
         Column("occurred_at", "str"),
         Column("phase", "str"),
         Column("action", "str"),
+        Column("operation", "str?"),
         Column("resource", "str"),
         Column("object_id", "str?"),
         Column("actor_id", "str?"),
@@ -566,6 +602,7 @@ async def upsert_admin_role(
 
 
 __all__ = [
+    "CLOSE_TASK_QUERY",
     "COUNT_TASKS_QUERY",
     "CREATE_ADMIN_AUDIT_EVENT_QUERY",
     "CREATE_TASK_QUERY",
@@ -578,6 +615,7 @@ __all__ = [
     "LIST_TASKS_NAME_DESC_QUERY",
     "UPDATE_TASK_QUERY",
     "UPSERT_ADMIN_ROLE_QUERY",
+    "CloseTaskRow",
     "CountTasksRow",
     "CreateTaskRow",
     "DeleteTaskRow",
@@ -588,6 +626,7 @@ __all__ = [
     "ListTasksNameAscRow",
     "ListTasksNameDescRow",
     "UpdateTaskRow",
+    "close_task",
     "count_tasks",
     "create_admin_audit_event",
     "create_task",

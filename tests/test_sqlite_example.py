@@ -102,6 +102,20 @@ async def test_generated_sqlite_repository_sessions_permissions_and_redacted_aud
         assert created.status == 303
         assert created.headers.get("location") == "/admin/tasks/object/1"
 
+        bulk_closed = await example.app.request(
+            "/admin/tasks/bulk",
+            method="POST",
+            headers=_mutation_headers(editor),
+            body=urlencode(
+                [
+                    ("action", "close"),
+                    ("selected", "1"),
+                ]
+            ),
+        )
+        assert bulk_closed.status == 200
+        assert "1 completed; 0 failed." in await bulk_closed.text()
+
         edited = await example.app.request(
             "/admin/tasks/object/1/edit",
             method="POST",
@@ -128,17 +142,25 @@ async def test_generated_sqlite_repository_sessions_permissions_and_redacted_aud
 
         events = await list_admin_audit_events(example.database)
         assert [
-            (event["phase"], event["action"], event["object_id"], event["actor_id"])
+            (
+                event["phase"],
+                event["action"],
+                event["operation"],
+                event["object_id"],
+                event["actor_id"],
+            )
             for event in events
         ] == [
-            ("failure", "resource:add", None, None),
-            ("attempt", "resource:add", None, editor_id),
-            ("success", "resource:add", "1", editor_id),
-            ("attempt", "resource:change", "1", editor_id),
-            ("success", "resource:change", "1", editor_id),
-            ("failure", "resource:delete", "1", None),
-            ("attempt", "resource:delete", "1", operator_id),
-            ("success", "resource:delete", "1", operator_id),
+            ("failure", "resource:add", None, None, None),
+            ("attempt", "resource:add", None, None, editor_id),
+            ("success", "resource:add", None, "1", editor_id),
+            ("attempt", "resource:bulk", "close", "1", editor_id),
+            ("success", "resource:bulk", "close", "1", editor_id),
+            ("attempt", "resource:change", None, "1", editor_id),
+            ("success", "resource:change", None, "1", editor_id),
+            ("failure", "resource:delete", None, "1", None),
+            ("attempt", "resource:delete", None, "1", operator_id),
+            ("success", "resource:delete", None, "1", operator_id),
         ]
         assert viewer_id not in {event["actor_id"] for event in events}
         assert "form-value-must-not-reach-audit" not in repr(events)

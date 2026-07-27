@@ -10,7 +10,17 @@ from urllib.parse import quote, urlencode
 from hayate import Context, Response
 from hayate_htmx import HtmxRequest, append_htmx_vary, select_render_mode
 
-from .contracts import Actor, AdminAsset, AdminField, AdminResource, ListQuery, Page, Record
+from .contracts import (
+    Actor,
+    AdminAsset,
+    AdminBulkAction,
+    AdminField,
+    AdminResource,
+    BulkActionResult,
+    ListQuery,
+    Page,
+    Record,
+)
 
 
 def _e(value: object) -> str:
@@ -134,6 +144,7 @@ class AdminRenderer:
         can_add: bool,
         can_change: bool,
         can_delete: bool,
+        bulk_actions: Sequence[AdminBulkAction],
     ) -> str:
         list_fields = tuple(field for field in resource.fields if field.list_display)
         controls = self._list_controls(resource, query)
@@ -149,6 +160,8 @@ class AdminRenderer:
                 f'<th scope="col">{self._sort_heading(resource, field, query)}</th>'
                 for field in list_fields
             )
+            if bulk_actions:
+                headings = '<th scope="col">Select</th>' + headings
             headings += '<th scope="col">Actions</th>'
             rows = "".join(
                 self._list_row(
@@ -157,6 +170,7 @@ class AdminRenderer:
                     list_fields,
                     can_change=can_change,
                     can_delete=can_delete,
+                    selectable=bool(bulk_actions),
                 )
                 for record in page.items
             )
@@ -164,6 +178,24 @@ class AdminRenderer:
                 f"<table><caption>{_e(resource.label)}</caption><thead><tr>{headings}</tr></thead>"
                 f"<tbody>{rows}</tbody></table>"
             )
+            if bulk_actions:
+                bulk_path = _path(self.prefix, resource, "bulk")
+                options = "".join(
+                    f'<option value="{_e(action.slug)}">{_e(action.label)}</option>'
+                    for action in bulk_actions
+                )
+                table = (
+                    f'<form method="post" action="{_e(bulk_path)}" '
+                    f'hx-post="{_e(bulk_path)}" hx-target="#hayate-admin" '
+                    'hx-select="#hayate-admin" hx-swap="outerHTML">'
+                    "<fieldset><legend>Bulk action</legend>"
+                    '<label for="bulk-action">Action</label>'
+                    '<select id="bulk-action" name="action" required>'
+                    '<option value="">Choose an action</option>'
+                    f"{options}</select>"
+                    '<button type="submit">Apply to selected</button>'
+                    f"</fieldset>{table}</form>"
+                )
         pagination = self._pagination(resource, page, query)
         return (
             f"<h1>{_e(resource.label)}</h1>{create}{controls}"
@@ -224,10 +256,18 @@ class AdminRenderer:
         *,
         can_change: bool,
         can_delete: bool,
+        selectable: bool,
     ) -> str:
         object_id = _record_id(resource, record)
         detail = _path(self.prefix, resource, "object", object_id)
         cells = []
+        if selectable:
+            selection_label = f"Select {_record_title(resource, record)}"
+            cells.append(
+                '<td><input type="checkbox" name="selected" '
+                f'value="{_e(object_id)}" aria-label="{_e(selection_label)}">'
+                "</td>"
+            )
         for index, field in enumerate(fields):
             value = _record_value(record, field.name)
             displayed = _display(value)
@@ -242,6 +282,40 @@ class AdminRenderer:
         return (
             f'<tr data-object-id="{_e(object_id)}">{"".join(cells)}'
             f"<td>{' · '.join(actions)}</td></tr>"
+        )
+
+    def bulk_error(self, resource: AdminResource, message: str) -> str:
+        back = _link(f"Return to {resource.label}", _path(self.prefix, resource))
+        return (
+            '<section role="alert" aria-labelledby="bulk-action-error">'
+            '<h1 id="bulk-action-error">Bulk action rejected</h1>'
+            f"<p>{_e(message)}</p></section><p>{back}</p>"
+        )
+
+    def bulk_result(
+        self,
+        resource: AdminResource,
+        action: AdminBulkAction,
+        result: BulkActionResult,
+    ) -> str:
+        succeeded = len(result.succeeded)
+        failed = len(result.failed)
+        failures = ""
+        if result.failed:
+            items = "".join(
+                f"<li>{_e(object_id)}: {_e(message)}</li>"
+                for object_id, message in result.failed.items()
+            )
+            failures = (
+                '<section aria-labelledby="bulk-action-failures">'
+                '<h2 id="bulk-action-failures">Not completed</h2>'
+                f"<ul>{items}</ul></section>"
+            )
+        back = _link(f"Return to {resource.label}", _path(self.prefix, resource))
+        return (
+            f"<h1>{_e(action.label)}</h1>"
+            f'<p role="status">{succeeded} completed; {failed} failed.</p>'
+            f"{failures}<p>{back}</p>"
         )
 
     def _pagination(self, resource: AdminResource, page: Page, query: ListQuery) -> str:

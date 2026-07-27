@@ -6,14 +6,17 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Protocol
 
+from hayate import Context
 from hayate_sql import Database
 
 from hayate_admin import (
+    AdminBulkAction,
     AdminField,
     AdminRepository,
     AdminRepositoryFactory,
     AdminResource,
     AdminValidationError,
+    BulkActionResult,
     ListQuery,
     Page,
     Record,
@@ -104,6 +107,14 @@ class TaskQueryFacade(Protocol):
         id: int,
     ) -> Mapping[str, object] | None: ...
 
+    async def close_task(
+        self,
+        db: Database,
+        /,
+        *,
+        id: int,
+    ) -> Mapping[str, object] | None: ...
+
 
 type ListScopeFactory = Callable[[], AbstractAsyncContextManager[object]]
 
@@ -154,10 +165,12 @@ class TaskRepository:
         queries: TaskQueryFacade,
         *,
         list_scope: ListScopeFactory | None = None,
+        mutation_scope: ListScopeFactory | None = None,
     ) -> None:
         self._database = database
         self._queries = queries
         self._list_scope = list_scope or _unscoped_list
+        self._mutation_scope = mutation_scope or _unscoped_list
 
     async def list(self, query: ListQuery) -> Page:
         search = query.search or ""
@@ -237,6 +250,33 @@ class TaskRepository:
             and await self._queries.delete_task(self._database, id=task_id) is not None
         )
 
+    async def close(self, object_ids: tuple[str, ...]) -> BulkActionResult:
+        succeeded = []
+        failed = {}
+        async with self._mutation_scope():
+            for object_id in object_ids:
+                task_id = _integer_id(object_id)
+                if task_id is None:
+                    failed[object_id] = "Invalid task ID."
+                    continue
+                row = await self._queries.close_task(self._database, id=task_id)
+                if row is None:
+                    failed[object_id] = "Task no longer exists."
+                else:
+                    succeeded.append(object_id)
+        return BulkActionResult(succeeded, failed)
+
+
+async def _close_selected(
+    context: Context,
+    repository: AdminRepository,
+    object_ids: tuple[str, ...],
+) -> BulkActionResult:
+    del context
+    if not isinstance(repository, TaskRepository):
+        raise TypeError("close action requires the task repository")
+    return await repository.close(object_ids)
+
 
 def task_resource(
     repository: AdminRepository | AdminRepositoryFactory,
@@ -266,6 +306,14 @@ def task_resource(
                 required=False,
                 list_display=False,
                 max_length=2000,
+            ),
+        ),
+        bulk_actions=(
+            AdminBulkAction(
+                "close",
+                "Close selected",
+                "resource:change",
+                _close_selected,
             ),
         ),
         page_size=10,

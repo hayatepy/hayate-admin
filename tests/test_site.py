@@ -10,11 +10,13 @@ from hayate import Hayate
 from hayate_admin import (
     Actor,
     AdminAction,
+    AdminBulkAction,
     AdminField,
     AdminResource,
     AdminSite,
     AdminValidationError,
     AuditEvent,
+    BulkActionResult,
     ListQuery,
     Page,
 )
@@ -92,7 +94,11 @@ class MemoryRepository:
         return self.records.pop(object_id, None) is not None
 
 
-def resource(repository: MemoryRepository) -> AdminResource:
+def resource(
+    repository: MemoryRepository,
+    *,
+    bulk_actions: tuple[AdminBulkAction, ...] = (),
+) -> AdminResource:
     return AdminResource(
         "users",
         "Users",
@@ -125,6 +131,7 @@ def resource(repository: MemoryRepository) -> AdminResource:
             ),
         ),
         repository,
+        bulk_actions=bulk_actions,
         title_field="name",
         page_size=1,
     )
@@ -134,6 +141,7 @@ def make_app(
     repository: MemoryRepository,
     *,
     allowed: set[AdminAction] | None = None,
+    bulk_actions: tuple[AdminBulkAction, ...] = (),
 ):
     permitted = allowed or {
         "site:view",
@@ -141,6 +149,7 @@ def make_app(
         "resource:add",
         "resource:change",
         "resource:delete",
+        "resource:bulk",
     }
     authorization_calls = []
     audit_events: list[AuditEvent] = []
@@ -163,7 +172,7 @@ def make_app(
         authorize=authorize,
         audit=audit,
     )
-    site.add(resource(repository))
+    site.add(resource(repository, bulk_actions=bulk_actions))
     site.register(app)
     return app, site, authorization_calls, audit_events
 
@@ -273,6 +282,176 @@ async def test_list_query_is_allowlisted_bounded_and_safely_escaped():
     )
     assert repository.queries[-1].order_by is None
     assert repository.queries[-1].filters == {}
+
+
+async def test_bulk_action_is_explicit_bounded_and_audited_per_object():
+    repository = MemoryRepository()
+
+    async def close_selected(context, admin_repository, object_ids):
+        succeeded = []
+        failed = {}
+        for object_id in object_ids:
+            record = repository.records.get(object_id)
+            if record is None:
+                failed[object_id] = "Record no longer exists."
+            else:
+                record["status"] = "closed"
+                succeeded.append(object_id)
+        return BulkActionResult(succeeded, failed)
+
+    action = AdminBulkAction(
+        "close",
+        "Close selected",
+        "resource:change",
+        close_selected,
+        max_selected=2,
+    )
+    app, _, _, audit_events = make_app(repository, bulk_actions=(action,))
+
+    listing = await app.request("/admin/users")
+    listing_body = await response_text(listing)
+    assert 'name="selected"' in listing_body
+    assert 'value="close"' in listing_body
+    assert 'aria-label="Select &lt;script&gt;alert(1)&lt;/script&gt;"' in listing_body
+
+    response = await app.request(
+        "/admin/users/bulk",
+        method="POST",
+        headers=mutation_headers(),
+        body=urlencode(
+            [
+                ("action", "close"),
+                ("selected", "1"),
+                ("selected", "missing"),
+            ]
+        ),
+    )
+    body = await response_text(response)
+    assert response.status == 200
+    assert "1 completed; 1 failed." in body
+    assert "Record no longer exists." in body
+    assert repository.records["1"]["status"] == "closed"
+    assert [
+        (event.phase, event.object_id, event.error_type, event.operation) for event in audit_events
+    ] == [
+        ("attempt", "1", None, "close"),
+        ("attempt", "missing", None, "close"),
+        ("success", "1", None, "close"),
+        ("failure", "missing", "BulkActionFailed", "close"),
+    ]
+
+    rejected = await app.request(
+        "/admin/users/bulk",
+        method="POST",
+        headers=mutation_headers(),
+        body=urlencode(
+            [
+                ("action", "close"),
+                ("selected", "1"),
+                ("selected", "2"),
+                ("selected", "3"),
+            ]
+        ),
+    )
+    assert rejected.status == 422
+    assert "Select at most 2 records." in await response_text(rejected)
+
+
+async def test_bulk_action_checks_every_object_permission_before_callback():
+    repository = MemoryRepository()
+    callback_calls = []
+    audit_events: list[AuditEvent] = []
+
+    async def handler(context, admin_repository, object_ids):
+        callback_calls.append(object_ids)
+        return BulkActionResult(object_ids)
+
+    async def authorize(context, action, admin_resource, object_id):
+        if action == "resource:change" and object_id == "2":
+            return None
+        return Actor("operator-1", "Operator")
+
+    async def audit(event):
+        audit_events.append(event)
+
+    app = Hayate()
+    site = AdminSite(
+        title="Operations",
+        allowed_origins={ORIGIN},
+        authorize=authorize,
+        audit=audit,
+    )
+    site.add(
+        resource(
+            repository,
+            bulk_actions=(AdminBulkAction("close", "Close selected", "resource:change", handler),),
+        )
+    )
+    site.register(app)
+
+    response = await app.request(
+        "/admin/users/bulk",
+        method="POST",
+        headers=mutation_headers(),
+        body=urlencode(
+            [
+                ("action", "close"),
+                ("selected", "1"),
+                ("selected", "2"),
+            ]
+        ),
+    )
+    assert response.status == 403
+    assert callback_calls == []
+    assert [
+        (event.phase, event.object_id, event.error_type, event.operation) for event in audit_events
+    ] == [("failure", "2", "AuthorizationDenied", "close")]
+
+
+async def test_bulk_action_rejects_unknown_cross_origin_and_incomplete_results():
+    repository = MemoryRepository()
+    callback_calls = []
+
+    async def incomplete(context, admin_repository, object_ids):
+        callback_calls.append(object_ids)
+        return BulkActionResult(object_ids[:1])
+
+    action = AdminBulkAction("close", "Close selected", "resource:change", incomplete)
+    app, _, _, audit_events = make_app(repository, bulk_actions=(action,))
+
+    unknown = await app.request(
+        "/admin/users/bulk",
+        method="POST",
+        headers=mutation_headers(),
+        body=urlencode({"action": "unregistered", "selected": "1"}),
+    )
+    assert unknown.status == 422
+    assert callback_calls == []
+
+    cross_origin = await app.request(
+        "/admin/users/bulk",
+        method="POST",
+        headers=mutation_headers(origin="https://evil.example"),
+        body=urlencode({"action": "close", "selected": "1"}),
+    )
+    assert cross_origin.status == 403
+    assert callback_calls == []
+
+    incomplete_result = await app.request(
+        "/admin/users/bulk",
+        method="POST",
+        headers=mutation_headers(),
+        body=urlencode(
+            [
+                ("action", "close"),
+                ("selected", "1"),
+                ("selected", "2"),
+            ]
+        ),
+    )
+    assert incomplete_result.status == 500
+    assert callback_calls == [("1", "2")]
+    assert [event.error_type for event in audit_events[-2:]] == ["ValueError", "ValueError"]
 
 
 async def test_htmx_list_returns_only_the_fragment_and_complete_vary():
