@@ -132,6 +132,30 @@ async def test_real_browser_create_search_filter_sort_edit_delete(
         await _create_task(page, "Zulu task", "open")
         await _create_task(page, "Alpha task", "closed")
 
+        await page.get_by_role("link", name="Add Task").click()
+        await page.get_by_role("link", name="Search Parent task").click()
+        await expect(page.get_by_role("heading", name="Choose Parent task")).to_be_visible()
+        await page.get_by_label("Search Parent task").fill("Alpha")
+        await page.get_by_role("button", name="Search").click()
+        await expect(page.get_by_role("status")).to_contain_text("1 matching authorized record.")
+        await page.get_by_role("link", name="Choose").click()
+        await expect(page.get_by_label("Parent task")).to_have_value("2")
+        await page.get_by_label("Name").fill("Related child")
+        await page.get_by_label("Status").select_option("open")
+        await page.get_by_label("Active").check()
+        await page.get_by_label("Notes").fill("Notes for Related child")
+        await page.get_by_role("button", name="Create").click()
+        await expect(page.get_by_role("heading", name="Related child")).to_be_visible()
+        await expect(page.get_by_role("link", name="Alpha task")).to_be_visible()
+
+        await page.goto(f"{live_example.url}/admin/tasks/object/2/inline/subtasks")
+        await expect(page.get_by_role("heading", name="Subtasks for Alpha task")).to_be_visible()
+        await expect(page.locator('input[value="Related child"]')).to_have_count(1)
+        await page.get_by_role("button", name="Delete inline record").click()
+        await expect(page.locator('input[value="Related child"]')).to_have_count(0)
+        await page.get_by_role("link", name="Back to parent record").click()
+        await page.get_by_role("link", name="Back to Tasks").click()
+
         await page.get_by_role("link", name="Name").click()
         rows = page.locator("tbody tr")
         await expect(rows).to_have_count(2)
@@ -183,7 +207,7 @@ async def test_real_browser_create_search_filter_sort_edit_delete(
         events = await list_admin_audit_events(database)
     finally:
         await database.close()
-    assert [event["phase"] for event in events].count("success") == 5
+    assert [event["phase"] for event in events].count("success") == 7
     assert sum(event["operation"] == "close" for event in events) == 2
     assert "Zulu task" not in repr(events)
     assert "Alpha task" not in repr(events)

@@ -15,12 +15,18 @@ from .contracts import (
     AdminAsset,
     AdminBulkAction,
     AdminField,
+    AdminInline,
+    AdminRelationship,
     AdminResource,
     AuditHistoryPage,
     BulkActionResult,
+    InlineCollection,
+    InlineOperation,
     ListQuery,
     Page,
     Record,
+    RelationshipChoice,
+    RelationshipPage,
 )
 
 
@@ -351,12 +357,27 @@ class AdminRenderer:
         can_change: bool,
         can_delete: bool,
         can_history: bool,
+        inlines: Sequence[AdminInline],
     ) -> str:
         object_id = _record_id(resource, record)
-        entries = "".join(
-            f"<dt>{_e(field.label)}</dt><dd>{_display(_record_value(record, field.name))}</dd>"
-            for field in resource.fields
-        )
+        relationship_map = resource.relationship_map
+        display_fields = {relationship.display_field for relationship in resource.relationships}
+        entries = []
+        for field in resource.fields:
+            if field.name in display_fields:
+                continue
+            relationship = relationship_map.get(field.name)
+            value = _record_value(record, field.name)
+            if relationship is None or value is None:
+                displayed = _display(value)
+            else:
+                label = _record_value(record, relationship.display_field)
+                target = (
+                    f"{self.prefix}/{relationship.target_resource}/object/"
+                    f"{quote(str(value), safe='')}"
+                )
+                displayed = _link(label if label is not None else value, target)
+            entries.append(f"<dt>{_e(field.label)}</dt><dd>{displayed}</dd>")
         actions = [_link(f"Back to {resource.label}", _path(self.prefix, resource))]
         base = _path(self.prefix, resource, "object", object_id)
         if can_change:
@@ -365,9 +386,16 @@ class AdminRenderer:
             actions.append(_link("Delete", f"{base}/delete"))
         if can_history:
             actions.append(_link("History", f"{base}/history"))
+        inline_links = ""
+        if inlines:
+            links = "".join(
+                f"<li>{_link(inline.label, f'{base}/inline/{inline.slug}')}</li>"
+                for inline in inlines
+            )
+            inline_links = f"<h2>Related records</h2><ul>{links}</ul>"
         return (
             f"<h1>{_e(_record_title(resource, record))}</h1>"
-            f"<dl>{entries}</dl><p>{' · '.join(actions)}</p>"
+            f"<dl>{''.join(entries)}</dl>{inline_links}<p>{' · '.join(actions)}</p>"
         )
 
     def history(
@@ -421,6 +449,82 @@ class AdminRenderer:
             f"{table}{pagination}<p>{_link('Back to record', detail)}</p>"
         )
 
+    def relationship_choices(
+        self,
+        resource: AdminResource,
+        relationship: AdminRelationship,
+        page: RelationshipPage,
+        *,
+        search: str | None,
+        page_number: int,
+        source_object_id: str | None,
+    ) -> str:
+        field = resource.field_map[relationship.field]
+        action = _path(
+            self.prefix,
+            resource,
+            "relationship",
+            relationship.field,
+            "choices",
+        )
+        hidden = (
+            ""
+            if source_object_id is None
+            else f'<input type="hidden" name="object_id" value="{_e(source_object_id)}">'
+        )
+        search_form = (
+            f'<form method="get" action="{_e(action)}" hx-get="{_e(action)}" '
+            'hx-target="#hayate-admin" hx-select="#hayate-admin" hx-swap="outerHTML" '
+            'hx-push-url="true">'
+            f"{hidden}<label>Search {field.label}"
+            f'<input type="search" name="q" value="{_e(search or "")}" '
+            'maxlength="200"></label><button type="submit">Search</button></form>'
+        )
+        destination = (
+            _path(self.prefix, resource, "create")
+            if source_object_id is None
+            else _path(self.prefix, resource, "object", source_object_id, "edit")
+        )
+        if not page.items:
+            results = '<p role="status">No authorized related records found.</p>'
+        else:
+            items = []
+            for choice in page.items:
+                href = f"{destination}?{urlencode({f'relation_{relationship.field}': choice.id})}"
+                items.append(f"<li>{_e(choice.label)} — {_link('Choose', href)}</li>")
+            results = (
+                f'<p role="status">{page.total} matching authorized '
+                f"record{'s' if page.total != 1 else ''}.</p>"
+                f'<ul aria-label="{_e(field.label)} choices">{"".join(items)}</ul>'
+            )
+        page_count = max(1, math.ceil(page.total / relationship.max_choices))
+        links = []
+        base_params = {}
+        if search:
+            base_params["q"] = search
+        if source_object_id is not None:
+            base_params["object_id"] = source_object_id
+        if page_number > 1:
+            links.append(
+                _link(
+                    "Previous",
+                    f"{action}?{urlencode(base_params | {'page': page_number - 1})}",
+                )
+            )
+        links.append(f"<span>Page {page_number} of {page_count}</span>")
+        if page_number < page_count:
+            links.append(
+                _link(
+                    "Next",
+                    f"{action}?{urlencode(base_params | {'page': page_number + 1})}",
+                )
+            )
+        pagination = f'<nav aria-label="Relationship pagination">{" · ".join(links)}</nav>'
+        return (
+            f"<h1>Choose {_e(field.label)}</h1>{search_form}{results}{pagination}"
+            f"<p>{_link('Return without choosing', destination)}</p>"
+        )
+
     def form(
         self,
         resource: AdminResource,
@@ -430,6 +534,8 @@ class AdminRenderer:
         values: Mapping[str, object],
         errors: Mapping[str, str],
         submit_label: str,
+        relationship_choices: Mapping[str, Sequence[RelationshipChoice]],
+        source_object_id: str | None,
     ) -> str:
         summary = ""
         if errors:
@@ -439,16 +545,84 @@ class AdminRenderer:
                 '<h2 id="admin-form-errors">Correct the following errors</h2>'
                 f"<ul>{items}</ul></section>"
             )
-        controls = "".join(
-            self._field_control(field, values.get(field.name), errors.get(field.name))
-            for field in resource.fields
-        )
+        display_fields = {relationship.display_field for relationship in resource.relationships}
+        controls = []
+        for field in resource.fields:
+            if field.name in display_fields:
+                continue
+            relationship = resource.relationship_map.get(field.name)
+            if relationship is None:
+                controls.append(
+                    self._field_control(
+                        field,
+                        values.get(field.name),
+                        errors.get(field.name),
+                    )
+                )
+            else:
+                controls.append(
+                    self._relationship_control(
+                        resource,
+                        field,
+                        relationship,
+                        values.get(field.name),
+                        errors.get(field.name),
+                        relationship_choices.get(field.name, ()),
+                        source_object_id=source_object_id,
+                    )
+                )
         cancel = _link(f"Cancel and return to {resource.label}", _path(self.prefix, resource))
         return (
             f"<h1>{_e(heading)}</h1>{summary}"
             f'<form method="post" action="{_e(action)}" hx-post="{_e(action)}" '
             'hx-target="#hayate-admin" hx-select="#hayate-admin" hx-swap="outerHTML">'
-            f'{controls}<button type="submit">{_e(submit_label)}</button></form><p>{cancel}</p>'
+            f'{"".join(controls)}<button type="submit">{_e(submit_label)}</button></form>'
+            f"<p>{cancel}</p>"
+        )
+
+    def _relationship_control(
+        self,
+        resource: AdminResource,
+        field: AdminField,
+        relationship: AdminRelationship,
+        value: object | None,
+        error: str | None,
+        choices: Sequence[RelationshipChoice],
+        *,
+        source_object_id: str | None,
+    ) -> str:
+        field_id = f"field-{field.name}"
+        required = " required" if field.required else ""
+        invalid = ' aria-invalid="true"' if error is not None else ""
+        described = f' aria-describedby="{_e(field_id)}-error"' if error is not None else ""
+        raw = "" if value is None else str(value)
+        options = []
+        if not field.required:
+            options.append('<option value="">—</option>')
+        options.extend(
+            f'<option value="{_e(choice.id)}"{" selected" if choice.id == raw else ""}>'
+            f"{_e(choice.label)}</option>"
+            for choice in choices
+        )
+        chooser = _path(
+            self.prefix,
+            resource,
+            "relationship",
+            relationship.field,
+            "choices",
+        )
+        if source_object_id is not None:
+            chooser = f"{chooser}?{urlencode({'object_id': source_object_id})}"
+        message = (
+            f'<p id="{_e(field_id)}-error" role="alert">{_e(error)}</p>'
+            if error is not None
+            else ""
+        )
+        return (
+            f'<div><label for="{_e(field_id)}">{_e(field.label)}</label>'
+            f'<select id="{_e(field_id)}" name="{_e(field.name)}"'
+            f"{required}{invalid}{described}>{''.join(options)}</select>"
+            f"<span> {_link(f'Search {field.label}', chooser)}</span>{message}</div>"
         )
 
     def _field_control(
@@ -456,8 +630,12 @@ class AdminRenderer:
         field: AdminField,
         value: object | None,
         error: str | None,
+        *,
+        control_name: str | None = None,
+        control_id: str | None = None,
     ) -> str:
-        field_id = f"field-{field.name}"
+        field_id = control_id or f"field-{field.name}"
+        field_name = control_name or field.name
         if field.read_only:
             return (
                 f'<div><span id="{_e(field_id)}">{_e(field.label)}</span>'
@@ -469,7 +647,7 @@ class AdminRenderer:
         raw = "" if value is None else str(value)
         if field.kind == "textarea":
             control = (
-                f'<textarea id="{_e(field_id)}" name="{_e(field.name)}" '
+                f'<textarea id="{_e(field_id)}" name="{_e(field_name)}" '
                 f'maxlength="{field.max_length}"{required}{invalid}{described}>'
                 f"{_e(raw)}</textarea>"
             )
@@ -483,20 +661,20 @@ class AdminRenderer:
                 for choice, label in field.choices
             )
             control = (
-                f'<select id="{_e(field_id)}" name="{_e(field.name)}"'
+                f'<select id="{_e(field_id)}" name="{_e(field_name)}"'
                 f"{required}{invalid}{described}>{''.join(options)}</select>"
             )
         elif field.kind == "checkbox":
             checked = " checked" if bool(value) else ""
             control = (
-                f'<input id="{_e(field_id)}" name="{_e(field.name)}" '
+                f'<input id="{_e(field_id)}" name="{_e(field_name)}" '
                 f'type="checkbox" value="true"{checked}{invalid}{described}>'
             )
         else:
             input_type = field.kind if field.kind != "integer" else "number"
             step = ' step="any"' if field.kind == "number" else ""
             control = (
-                f'<input id="{_e(field_id)}" name="{_e(field.name)}" '
+                f'<input id="{_e(field_id)}" name="{_e(field_name)}" '
                 f'type="{_e(input_type)}" value="{_e(raw)}" maxlength="{field.max_length}"'
                 f"{step}{required}{invalid}{described}>"
             )
@@ -506,6 +684,138 @@ class AdminRenderer:
             else ""
         )
         return f'<div><label for="{_e(field_id)}">{_e(field.label)}</label>{control}{message}</div>'
+
+    def inline_editor(
+        self,
+        parent_resource: AdminResource,
+        parent: Record,
+        target_resource: AdminResource,
+        inline: AdminInline,
+        collection: InlineCollection,
+        *,
+        permissions: Mapping[str, tuple[bool, bool]],
+        can_add: bool,
+        errors: Mapping[str, str],
+        error_object_id: str | None,
+        error_values: Mapping[str, object] | None = None,
+        error_operation: InlineOperation | None = None,
+    ) -> str:
+        parent_id = _record_id(parent_resource, parent)
+        parent_detail = _path(
+            self.prefix,
+            parent_resource,
+            "object",
+            parent_id,
+        )
+        action = f"{parent_detail}/inline/{inline.slug}"
+        sections = []
+        for record in collection.items:
+            object_id = _record_id(target_resource, record)
+            can_change, can_delete = permissions.get(object_id, (False, False))
+            row_errors = (
+                errors
+                if error_operation in ("update", "delete") and error_object_id == object_id
+                else {}
+            )
+            values = error_values if row_errors and error_values is not None else record
+            if not can_change and not can_delete:
+                rendered = "".join(
+                    f"<dt>{_e(target_resource.field_map[name].label)}</dt>"
+                    f"<dd>{_display(record.get(name))}</dd>"
+                    for name in inline.fields
+                )
+                sections.append(
+                    f'<section aria-labelledby="inline-{_e(object_id)}">'
+                    f'<h2 id="inline-{_e(object_id)}">{_e(object_id)}</h2>'
+                    f"<dl>{rendered}</dl></section>"
+                )
+                continue
+            controls = "".join(
+                self._field_control(
+                    target_resource.field_map[name],
+                    values.get(name) if values is not None else None,
+                    row_errors.get(name),
+                    control_name=name,
+                    control_id=f"inline-{object_id}-{name}",
+                )
+                for name in inline.fields
+            )
+            buttons = []
+            if can_change:
+                buttons.append(
+                    '<button type="submit" name="operation" value="update">'
+                    "Save inline record</button>"
+                )
+            if can_delete:
+                buttons.append(
+                    '<button type="submit" name="operation" value="delete" '
+                    "formnovalidate>Delete inline record</button>"
+                )
+            sections.append(
+                f'<section aria-labelledby="inline-{_e(object_id)}">'
+                f'<h2 id="inline-{_e(object_id)}">{_e(object_id)}</h2>'
+                f"{self._error_summary(row_errors, f'inline-{object_id}-errors')}"
+                f'<form method="post" action="{_e(action)}" hx-post="{_e(action)}" '
+                'hx-target="#hayate-admin" hx-select="#hayate-admin" '
+                'hx-swap="outerHTML">'
+                f'<input type="hidden" name="object_id" value="{_e(object_id)}">'
+                f"{controls}{' '.join(buttons)}</form></section>"
+            )
+        add = ""
+        if can_add:
+            add_errors = errors if error_operation == "create" and error_object_id is None else {}
+            values = error_values if add_errors and error_values is not None else {}
+            controls = "".join(
+                self._field_control(
+                    target_resource.field_map[name],
+                    values.get(name),
+                    add_errors.get(name),
+                    control_name=name,
+                    control_id=f"inline-new-{name}",
+                )
+                for name in inline.fields
+            )
+            add = (
+                '<section aria-labelledby="inline-add">'
+                f'<h2 id="inline-add">Add {_e(target_resource.singular_label)}</h2>'
+                f"{self._error_summary(add_errors, 'inline-new-errors')}"
+                f'<form method="post" action="{_e(action)}" hx-post="{_e(action)}" '
+                'hx-target="#hayate-admin" hx-select="#hayate-admin" '
+                'hx-swap="outerHTML">'
+                f'{controls}<button type="submit" name="operation" value="create">'
+                "Add inline record</button></form></section>"
+            )
+        elif collection.total >= inline.max_items:
+            add = (
+                f'<p role="status">The {inline.max_items}-record inline limit has been reached.</p>'
+            )
+        general_errors = (
+            errors
+            if errors
+            and (
+                error_operation is None
+                or (error_operation == "create" and not can_add)
+                or (error_operation in ("update", "delete") and error_object_id not in permissions)
+            )
+            else {}
+        )
+        return (
+            f"<h1>{_e(inline.label)} for {_e(_record_title(parent_resource, parent))}</h1>"
+            f"{self._error_summary(general_errors, 'inline-general-errors')}"
+            f'<p role="status">{collection.total} of {inline.max_items} allowed records.</p>'
+            f"{''.join(sections)}{add}<p>{_link('Back to parent record', parent_detail)}</p>"
+        )
+
+    @staticmethod
+    def _error_summary(errors: Mapping[str, str], identifier: str) -> str:
+        if not errors:
+            return ""
+        items = "".join(f"<li>{_e(message)}</li>" for message in errors.values())
+        return (
+            f'<section role="alert" aria-labelledby="{_e(identifier)}">'
+            f'<h3 id="{_e(identifier)}">Correct the following errors</h3>'
+            f"<ul>{items}</ul></section>"
+        )
 
     def delete_confirmation(self, resource: AdminResource, record: Record, *, action: str) -> str:
         object_id = _record_id(resource, record)

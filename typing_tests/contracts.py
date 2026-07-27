@@ -6,6 +6,8 @@ from typing import assert_type
 from hayate import Context
 
 from hayate_admin import (
+    AdminInline,
+    AdminRelationship,
     AdminRepository,
     AdminRepositoryFactory,
     AdminResource,
@@ -14,8 +16,18 @@ from hayate_admin import (
     AuditHistoryReaderFactory,
     BulkActionHandler,
     BulkActionResult,
+    InlineCollection,
+    InlineMutation,
+    InlineMutationResult,
+    InlineMutator,
+    InlineReader,
     ListQuery,
     Page,
+    RelationshipChoice,
+    RelationshipPage,
+    RelationshipQuery,
+    RelationshipResolver,
+    RelationshipSearcher,
 )
 
 
@@ -84,3 +96,63 @@ def history_factory(context: Context) -> AuditHistoryReader:
 
 reader_factory: AuditHistoryReaderFactory = history_factory
 assert_type(reader_factory, AuditHistoryReaderFactory)
+
+
+async def relationship_searcher(
+    context: Context,
+    source_resource: AdminResource,
+    target_resource: AdminResource,
+    relationship: AdminRelationship,
+    source_object_id: str | None,
+    query: RelationshipQuery,
+) -> RelationshipPage:
+    return RelationshipPage((), 0)
+
+
+relationship_search: RelationshipSearcher = relationship_searcher
+assert_type(relationship_search, RelationshipSearcher)
+
+
+async def relationship_resolver(
+    context: Context,
+    source_resource: AdminResource,
+    target_resource: AdminResource,
+    relationship: AdminRelationship,
+    source_object_id: str | None,
+    related_object_id: str,
+) -> RelationshipChoice | None:
+    return None
+
+
+relationship_resolve: RelationshipResolver = relationship_resolver
+assert_type(relationship_resolve, RelationshipResolver)
+
+
+async def inline_reader(
+    context: Context,
+    parent_resource: AdminResource,
+    target_resource: AdminResource,
+    inline: AdminInline,
+    parent_object_id: str,
+    limit: int,
+) -> InlineCollection:
+    return InlineCollection((), 0)
+
+
+read_inline: InlineReader = inline_reader
+assert_type(read_inline, InlineReader)
+
+
+async def inline_mutator(
+    context: Context,
+    parent_resource: AdminResource,
+    target_resource: AdminResource,
+    inline: AdminInline,
+    parent_object_id: str,
+    mutation: InlineMutation,
+) -> InlineMutationResult:
+    return InlineMutationResult(deleted=True)
+
+
+mutate_inline: InlineMutator = inline_mutator
+assert_type(mutate_inline, InlineMutator)

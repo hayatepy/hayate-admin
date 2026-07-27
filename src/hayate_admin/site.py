@@ -24,6 +24,8 @@ from .contracts import (
     AdminAction,
     AdminAsset,
     AdminBulkAction,
+    AdminInline,
+    AdminRelationship,
     AdminResource,
     AdminValidationError,
     AuditEvent,
@@ -35,9 +37,16 @@ from .contracts import (
     AuditSinkFactory,
     Authorizer,
     BulkActionResult,
+    InlineCollection,
+    InlineMutation,
+    InlineMutationResult,
+    InlineOperation,
     ListQuery,
     Page,
     Record,
+    RelationshipChoice,
+    RelationshipPage,
+    RelationshipQuery,
 )
 from .render import AdminRenderer
 
@@ -158,6 +167,7 @@ class AdminSite:
             raise RuntimeError("admin site is already registered")
         if not self._resources:
             raise RuntimeError("admin site requires at least one resource")
+        self._validate_resource_graph()
         self._registered = True
         prefix = self.prefix
 
@@ -180,6 +190,10 @@ class AdminSite:
         @app.post(f"{prefix}/:resource/bulk")
         async def admin_bulk(context: Context) -> Response:
             return await self._bulk(context)
+
+        @app.get(f"{prefix}/:resource/relationship/:field/choices")
+        async def admin_relationship_choices(context: Context) -> Response:
+            return await self._relationship_choices_view(context)
 
         @app.get(f"{prefix}/:resource/object/:object_id")
         async def admin_detail(context: Context) -> Response:
@@ -205,9 +219,70 @@ class AdminSite:
         async def admin_delete(context: Context) -> Response:
             return await self._delete(context)
 
+        @app.get(f"{prefix}/:resource/object/:object_id/inline/:inline")
+        async def admin_inline_form(context: Context) -> Response:
+            return await self._inline_form(context)
+
+        @app.post(f"{prefix}/:resource/object/:object_id/inline/:inline")
+        async def admin_inline_mutation(context: Context) -> Response:
+            return await self._inline_mutation(context)
+
+    def _validate_resource_graph(self) -> None:
+        for resource in self._resources.values():
+            for relationship in resource.relationships:
+                if relationship.target_resource not in self._resources:
+                    raise ValueError(
+                        f"{resource.slug}.{relationship.field}: unknown target resource "
+                        f"{relationship.target_resource!r}"
+                    )
+            for inline in resource.inlines:
+                target = self._resources.get(inline.target_resource)
+                if target is None:
+                    raise ValueError(
+                        f"{resource.slug}.{inline.slug}: unknown inline target "
+                        f"{inline.target_resource!r}"
+                    )
+                parent_field = target.field_map.get(inline.parent_field)
+                parent_relationship = target.relationship_map.get(inline.parent_field)
+                if (
+                    parent_field is None
+                    or parent_field.read_only
+                    or parent_relationship is None
+                    or parent_relationship.target_resource != resource.slug
+                ):
+                    raise ValueError(
+                        f"{resource.slug}.{inline.slug}: parent_field must be an explicit "
+                        "relationship back to the parent resource"
+                    )
+                for field_name in inline.fields:
+                    admin_field = target.field_map.get(field_name)
+                    if (
+                        admin_field is None
+                        or admin_field.read_only
+                        or field_name in (target.id_field, inline.parent_field)
+                        or field_name in target.relationship_map
+                    ):
+                        raise ValueError(
+                            f"{resource.slug}.{inline.slug}: inline field {field_name!r} "
+                            "must be a writable non-relationship target field"
+                        )
+
     def _resource(self, context: Context) -> AdminResource | None:
         slug = context.req.param("resource")
         return None if slug is None else self._resources.get(slug)
+
+    @staticmethod
+    def _relationship(
+        context: Context,
+        resource: AdminResource,
+    ) -> AdminRelationship | None:
+        field_name = context.req.param("field")
+        return None if field_name is None else resource.relationship_map.get(field_name)
+
+    @staticmethod
+    def _inline(context: Context, resource: AdminResource) -> AdminInline | None:
+        slug = context.req.param("inline")
+        return None if slug is None else resource.inline_map.get(slug)
 
     @staticmethod
     def _object_id(context: Context) -> str | None:
@@ -260,6 +335,10 @@ class AdminSite:
             return problem(400, title="Invalid admin list query", detail=str(error))
         page = await resource.repository_for(context).list(query)
         self._validate_page(resource, query, page)
+        visible_records = []
+        for record in page.items:
+            visible_records.append(await self._authorized_record(context, resource, record))
+        page = Page(tuple(visible_records), page.total)
         bulk_actions: tuple[AdminBulkAction, ...] = ()
         if resource.bulk_actions and (
             await self._allowed(context, "resource:bulk", resource) is not None
@@ -340,6 +419,30 @@ class AdminSite:
             raise ValueError(
                 f"{resource.slug}: repository exposed undeclared fields: {sorted(unknown)!r}"
             )
+        for relationship in resource.relationships:
+            related_id = record.get(relationship.field)
+            display = record.get(relationship.display_field)
+            if related_id is not None and display is None:
+                raise ValueError(
+                    f"{resource.slug}: repository did not preload {relationship.display_field!r}"
+                )
+
+    async def _authorized_record(
+        self,
+        context: Context,
+        resource: AdminResource,
+        record: Record,
+    ) -> Record:
+        visible = dict(record)
+        for relationship in resource.relationships:
+            related_id = record.get(relationship.field)
+            if related_id is None:
+                continue
+            target = self._resources[relationship.target_resource]
+            if await self._allowed(context, "resource:view", target, str(related_id)) is None:
+                visible[relationship.field] = None
+                visible[relationship.display_field] = None
+        return MappingProxyType(visible)
 
     async def _detail(self, context: Context) -> Response:
         resource = self._resource(context)
@@ -353,6 +456,12 @@ class AdminSite:
         if record is None:
             return self._not_found()
         self._validate_record(resource, record)
+        record = await self._authorized_record(context, resource, record)
+        visible_inlines = []
+        for inline in resource.inlines:
+            target = self._resources[inline.target_resource]
+            if await self._allowed(context, "resource:view", target) is not None:
+                visible_inlines.append(inline)
         content = self._renderer.detail(
             resource,
             record,
@@ -362,6 +471,7 @@ class AdminSite:
             is not None,
             can_history=self._has_history
             and await self._allowed(context, "resource:history", resource, object_id) is not None,
+            inlines=visible_inlines,
         )
         return self._renderer.response(
             context,
@@ -416,6 +526,175 @@ class AdminSite:
             content=content,
         )
 
+    async def _relationship_choices_view(self, context: Context) -> Response:
+        resource = self._resource(context)
+        if resource is None:
+            return self._not_found()
+        relationship = self._relationship(context, resource)
+        if relationship is None:
+            return self._not_found()
+        source_object_id = context.req.query("object_id")
+        if source_object_id is not None and (
+            not source_object_id
+            or len(source_object_id) > 255
+            or any(ord(character) < 0x20 for character in source_object_id)
+        ):
+            return problem(400, title="Invalid relationship source object")
+        source_action: AdminAction = (
+            "resource:add" if source_object_id is None else "resource:change"
+        )
+        actor = await self._allowed(context, source_action, resource, source_object_id)
+        if actor is None:
+            return self._forbidden()
+        if source_object_id is not None:
+            source_record = await resource.repository_for(context).get(source_object_id)
+            if source_record is None:
+                return self._not_found()
+            self._validate_record(resource, source_record)
+
+        search = context.req.query("q")
+        if search is not None:
+            search = search.strip() or None
+        if search is not None and len(search) > 200:
+            return problem(400, title="Invalid relationship search")
+        raw_page = context.req.query("page") or "1"
+        try:
+            page_number = int(raw_page)
+        except ValueError:
+            return problem(400, title="Invalid relationship page")
+        if not 1 <= page_number <= 1_000_000:
+            return problem(400, title="Invalid relationship page")
+        query = RelationshipQuery(
+            search=search,
+            offset=(page_number - 1) * relationship.max_choices,
+            limit=relationship.max_choices,
+        )
+        page = await self._search_relationship(
+            context,
+            resource,
+            relationship,
+            source_object_id,
+            query,
+        )
+        if page is None:
+            return self._forbidden()
+        content = self._renderer.relationship_choices(
+            resource,
+            relationship,
+            page,
+            search=search,
+            page_number=page_number,
+            source_object_id=source_object_id,
+        )
+        return self._renderer.response(
+            context,
+            title=f"Choose {resource.field_map[relationship.field].label}",
+            actor=actor,
+            content=content,
+        )
+
+    async def _search_relationship(
+        self,
+        context: Context,
+        resource: AdminResource,
+        relationship: AdminRelationship,
+        source_object_id: str | None,
+        query: RelationshipQuery,
+    ) -> RelationshipPage | None:
+        target = self._resources[relationship.target_resource]
+        if await self._allowed(context, "resource:view", target) is None:
+            return None
+        page = await relationship.search(
+            context,
+            resource,
+            target,
+            relationship,
+            source_object_id,
+            query,
+        )
+        if not isinstance(page, RelationshipPage):
+            raise TypeError("relationship search returned an invalid page")
+        if len(page.items) > query.limit:
+            raise ValueError("relationship search returned more than the requested limit")
+        for choice in page.items:
+            if await self._allowed(context, "resource:view", target, choice.id) is None:
+                raise ValueError("relationship search returned an unauthorized choice")
+        return page
+
+    async def _resolve_relationship(
+        self,
+        context: Context,
+        resource: AdminResource,
+        relationship: AdminRelationship,
+        source_object_id: str | None,
+        related_object_id: str,
+    ) -> RelationshipChoice | None:
+        target = self._resources[relationship.target_resource]
+        if await self._allowed(context, "resource:view", target) is None:
+            return None
+        choice = await relationship.resolve(
+            context,
+            resource,
+            target,
+            relationship,
+            source_object_id,
+            related_object_id,
+        )
+        if choice is None:
+            return None
+        if not isinstance(choice, RelationshipChoice) or choice.id != related_object_id:
+            raise ValueError("relationship resolver returned an invalid choice")
+        if await self._allowed(context, "resource:view", target, choice.id) is None:
+            return None
+        return choice
+
+    async def _relationship_form_state(
+        self,
+        context: Context,
+        resource: AdminResource,
+        source_object_id: str | None,
+        values: Mapping[str, object],
+    ) -> tuple[Mapping[str, object], Mapping[str, tuple[RelationshipChoice, ...]]] | None:
+        display_values = dict(values)
+        choice_pages: dict[str, tuple[RelationshipChoice, ...]] = {}
+        for relationship in resource.relationships:
+            page = await self._search_relationship(
+                context,
+                resource,
+                relationship,
+                source_object_id,
+                RelationshipQuery(search=None, offset=0, limit=relationship.max_choices),
+            )
+            if page is None:
+                return None
+            choices = list(page.items)
+            selected = context.req.query(f"relation_{relationship.field}")
+            if selected is None:
+                raw_selected = values.get(relationship.field)
+                selected = None if raw_selected is None else str(raw_selected)
+            if selected is not None:
+                if (
+                    not selected
+                    or len(selected) > 255
+                    or any(ord(character) < 0x20 for character in selected)
+                ):
+                    return None
+                choice = await self._resolve_relationship(
+                    context,
+                    resource,
+                    relationship,
+                    source_object_id,
+                    selected,
+                )
+                if choice is None:
+                    return None
+                if all(existing.id != choice.id for existing in choices):
+                    choices.append(choice)
+                display_values[relationship.field] = choice.id
+                display_values[relationship.display_field] = choice.label
+            choice_pages[relationship.field] = tuple(choices)
+        return MappingProxyType(display_values), MappingProxyType(choice_pages)
+
     async def _create_form(self, context: Context) -> Response:
         resource = self._resource(context)
         if resource is None:
@@ -423,13 +702,24 @@ class AdminSite:
         actor = await self._allowed(context, "resource:add", resource)
         if actor is None:
             return self._forbidden()
+        relationship_state = await self._relationship_form_state(
+            context,
+            resource,
+            None,
+            {},
+        )
+        if relationship_state is None:
+            return self._forbidden()
+        values, relationship_choices = relationship_state
         content = self._renderer.form(
             resource,
             action=f"{self.prefix}/{resource.slug}/create",
             heading=f"Add {resource.singular_label}",
-            values={},
+            values=values,
             errors={},
             submit_label="Create",
+            relationship_choices=relationship_choices,
+            source_object_id=None,
         )
         return self._renderer.response(
             context,
@@ -458,7 +748,7 @@ class AdminSite:
             return self._forbidden()
         await self._event(context, "attempt", "resource:add", resource, None, actor)
 
-        parsed = await self._parse_form(context, resource)
+        parsed = await self._parse_form(context, resource, None)
         if isinstance(parsed, Response):
             await self._failure(context, "resource:add", resource, None, actor, "InvalidForm")
             return parsed
@@ -472,7 +762,7 @@ class AdminSite:
                 actor,
                 "ValidationError",
             )
-            return self._form_error_response(
+            return await self._form_error_response(
                 context,
                 resource,
                 actor=actor,
@@ -481,6 +771,7 @@ class AdminSite:
                 values=display_values,
                 errors=errors,
                 submit_label="Create",
+                source_object_id=None,
             )
         try:
             record = await resource.repository_for(context).create(values)
@@ -493,7 +784,7 @@ class AdminSite:
                 actor,
                 type(error).__name__,
             )
-            return self._form_error_response(
+            return await self._form_error_response(
                 context,
                 resource,
                 actor=actor,
@@ -502,6 +793,7 @@ class AdminSite:
                 values=display_values,
                 errors=self._safe_errors(resource, error.errors),
                 submit_label="Create",
+                source_object_id=None,
             )
         except Exception as error:
             await self._failure(
@@ -650,14 +942,25 @@ class AdminSite:
         if record is None:
             return self._not_found()
         self._validate_record(resource, record)
+        relationship_state = await self._relationship_form_state(
+            context,
+            resource,
+            object_id,
+            record,
+        )
+        if relationship_state is None:
+            return self._forbidden()
+        values, relationship_choices = relationship_state
         action = f"{self._record_location(resource, object_id)}/edit"
         content = self._renderer.form(
             resource,
             action=action,
             heading=f"Edit {record.get(resource.title_field, object_id)}",
-            values=record,
+            values=values,
             errors={},
             submit_label="Save changes",
+            relationship_choices=relationship_choices,
+            source_object_id=object_id,
         )
         return self._renderer.response(
             context,
@@ -687,7 +990,7 @@ class AdminSite:
             return self._forbidden()
         await self._event(context, "attempt", "resource:change", resource, object_id, actor)
 
-        parsed = await self._parse_form(context, resource)
+        parsed = await self._parse_form(context, resource, object_id)
         if isinstance(parsed, Response):
             await self._failure(
                 context,
@@ -709,7 +1012,7 @@ class AdminSite:
                 actor,
                 "ValidationError",
             )
-            return self._form_error_response(
+            return await self._form_error_response(
                 context,
                 resource,
                 actor=actor,
@@ -718,6 +1021,7 @@ class AdminSite:
                 values=display_values,
                 errors=errors,
                 submit_label="Save changes",
+                source_object_id=object_id,
             )
         try:
             record = await resource.repository_for(context).update(object_id, values)
@@ -730,7 +1034,7 @@ class AdminSite:
                 actor,
                 type(error).__name__,
             )
-            return self._form_error_response(
+            return await self._form_error_response(
                 context,
                 resource,
                 actor=actor,
@@ -739,6 +1043,7 @@ class AdminSite:
                 values=display_values,
                 errors=self._safe_errors(resource, error.errors),
                 submit_label="Save changes",
+                source_object_id=object_id,
             )
         except Exception as error:
             await self._failure(
@@ -763,6 +1068,468 @@ class AdminSite:
         self._validate_record(resource, record)
         await self._event(context, "success", "resource:change", resource, object_id, actor)
         return self._redirect(context, self._record_location(resource, object_id))
+
+    async def _inline_form(self, context: Context) -> Response:
+        resource = self._resource(context)
+        object_id = self._object_id(context)
+        if resource is None or object_id is None:
+            return self._not_found()
+        inline = self._inline(context, resource)
+        if inline is None:
+            return self._not_found()
+        actor = await self._allowed(context, "resource:view", resource, object_id)
+        if actor is None:
+            return self._forbidden()
+        parent = await resource.repository_for(context).get(object_id)
+        if parent is None:
+            return self._not_found()
+        self._validate_record(resource, parent)
+        target = self._resources[inline.target_resource]
+        if await self._allowed(context, "resource:view", target) is None:
+            return self._forbidden()
+        collection = await self._read_inline(
+            context,
+            resource,
+            target,
+            inline,
+            object_id,
+        )
+        if collection is None:
+            return self._forbidden()
+        can_change_parent = (
+            await self._allowed(context, "resource:change", resource, object_id) is not None
+        )
+        permissions = (
+            await self._inline_permissions(context, target, collection)
+            if can_change_parent
+            else MappingProxyType(
+                {self._record_id(target, record): (False, False) for record in collection.items}
+            )
+        )
+        can_add = (
+            len(collection.items) < inline.max_items
+            and can_change_parent
+            and await self._allowed(context, "resource:add", target) is not None
+        )
+        content = self._renderer.inline_editor(
+            resource,
+            parent,
+            target,
+            inline,
+            collection,
+            permissions=permissions,
+            can_add=can_add,
+            errors={},
+            error_object_id=None,
+        )
+        return self._renderer.response(
+            context,
+            title=inline.label,
+            actor=actor,
+            content=content,
+        )
+
+    async def _read_inline(
+        self,
+        context: Context,
+        resource: AdminResource,
+        target: AdminResource,
+        inline: AdminInline,
+        object_id: str,
+    ) -> InlineCollection | None:
+        collection = await inline.read(
+            context,
+            resource,
+            target,
+            inline,
+            object_id,
+            inline.max_items,
+        )
+        if not isinstance(collection, InlineCollection):
+            raise TypeError("inline reader returned an invalid collection")
+        if collection.total > inline.max_items:
+            raise ValueError("inline reader exceeded the declared maximum")
+        seen: set[str] = set()
+        for record in collection.items:
+            self._validate_record(target, record)
+            child_id = self._record_id(target, record)
+            if child_id in seen:
+                raise ValueError("inline reader returned duplicate object IDs")
+            seen.add(child_id)
+            parent_id = record.get(inline.parent_field)
+            if parent_id is None or str(parent_id) != object_id:
+                raise ValueError("inline reader returned a record for another parent")
+            if await self._allowed(context, "resource:view", target, child_id) is None:
+                return None
+        return collection
+
+    async def _inline_permissions(
+        self,
+        context: Context,
+        target: AdminResource,
+        collection: InlineCollection,
+    ) -> Mapping[str, tuple[bool, bool]]:
+        permissions = {}
+        for record in collection.items:
+            object_id = self._record_id(target, record)
+            permissions[object_id] = (
+                await self._allowed(context, "resource:change", target, object_id) is not None,
+                await self._allowed(context, "resource:delete", target, object_id) is not None,
+            )
+        return MappingProxyType(permissions)
+
+    async def _inline_mutation(self, context: Context) -> Response:
+        resource = self._resource(context)
+        object_id = self._object_id(context)
+        if resource is None or object_id is None:
+            return self._not_found()
+        inline = self._inline(context, resource)
+        if inline is None:
+            return self._not_found()
+        guard = await self._guard_mutation(
+            context,
+            "resource:change",
+            resource,
+            object_id,
+        )
+        if guard is not None:
+            return guard
+        actor = await self._allowed(context, "resource:change", resource, object_id)
+        if actor is None:
+            await self._failure(
+                context,
+                "resource:change",
+                resource,
+                object_id,
+                None,
+                "AuthorizationDenied",
+                operation=f"inline:{inline.slug}",
+            )
+            return self._forbidden()
+        parent = await resource.repository_for(context).get(object_id)
+        if parent is None:
+            return self._not_found()
+        self._validate_record(resource, parent)
+        target = self._resources[inline.target_resource]
+        if await self._allowed(context, "resource:view", target) is None:
+            return self._forbidden()
+        collection = await self._read_inline(
+            context,
+            resource,
+            target,
+            inline,
+            object_id,
+        )
+        if collection is None:
+            await self._failure(
+                context,
+                "resource:change",
+                target,
+                None,
+                actor,
+                "AuthorizationDenied",
+                operation=f"inline:{resource.slug}:{inline.slug}",
+            )
+            return self._forbidden()
+        parsed = await self._parse_inline_form(
+            context,
+            target,
+            inline,
+            collection,
+        )
+        if isinstance(parsed, Response):
+            await self._failure(
+                context,
+                "resource:change",
+                target,
+                None,
+                actor,
+                "InvalidInlineForm",
+                operation=f"inline:{resource.slug}:{inline.slug}",
+            )
+            return parsed
+        mutation, display_values, errors = parsed
+        if errors:
+            if mutation.operation == "create":
+                invalid_action: AdminAction = "resource:add"
+            elif mutation.operation == "update":
+                invalid_action = "resource:change"
+            else:
+                invalid_action = "resource:delete"
+            await self._failure(
+                context,
+                invalid_action,
+                target,
+                mutation.object_id,
+                actor,
+                "InvalidInlineForm",
+                operation=f"inline:{resource.slug}:{inline.slug}",
+            )
+            return await self._inline_error_response(
+                context,
+                actor,
+                resource,
+                parent,
+                target,
+                inline,
+                collection,
+                mutation,
+                display_values,
+                errors,
+            )
+        if mutation.operation == "create":
+            action: AdminAction = "resource:add"
+        elif mutation.operation == "update":
+            action = "resource:change"
+        else:
+            action = "resource:delete"
+        if await self._allowed(context, action, target, mutation.object_id) is None:
+            await self._failure(
+                context,
+                action,
+                target,
+                mutation.object_id,
+                actor,
+                "AuthorizationDenied",
+                operation=f"inline:{resource.slug}:{inline.slug}",
+            )
+            return self._forbidden()
+        operation = f"inline:{resource.slug}:{inline.slug}"
+        await self._event(
+            context,
+            "attempt",
+            action,
+            target,
+            mutation.object_id,
+            actor,
+            operation=operation,
+        )
+        try:
+            result = await inline.mutate(
+                context,
+                resource,
+                target,
+                inline,
+                object_id,
+                mutation,
+            )
+            result_id = self._validate_inline_result(
+                target,
+                inline,
+                object_id,
+                mutation,
+                result,
+            )
+        except AdminValidationError as error:
+            await self._failure(
+                context,
+                action,
+                target,
+                mutation.object_id,
+                actor,
+                type(error).__name__,
+                operation=operation,
+            )
+            return await self._inline_error_response(
+                context,
+                actor,
+                resource,
+                parent,
+                target,
+                inline,
+                collection,
+                mutation,
+                display_values,
+                self._safe_inline_errors(target, inline, error.errors),
+            )
+        except Exception as error:
+            await self._failure(
+                context,
+                action,
+                target,
+                mutation.object_id,
+                actor,
+                type(error).__name__,
+                operation=operation,
+            )
+            raise
+        await self._event(
+            context,
+            "success",
+            action,
+            target,
+            result_id,
+            actor,
+            operation=operation,
+        )
+        return self._redirect(
+            context,
+            f"{self._record_location(resource, object_id)}/inline/{inline.slug}",
+        )
+
+    async def _parse_inline_form(
+        self,
+        context: Context,
+        target: AdminResource,
+        inline: AdminInline,
+        collection: InlineCollection,
+    ) -> tuple[InlineMutation, Mapping[str, object], Mapping[str, str]] | Response:
+        content_type = (context.req.header("content-type") or "").partition(";")[0].strip().lower()
+        if content_type != "application/x-www-form-urlencoded":
+            return problem(415, title="Admin forms require application/x-www-form-urlencoded")
+        limits = FormDataLimits(
+            max_body_bytes=_FORM_BODY_LIMIT,
+            max_file_bytes=0,
+            max_field_bytes=16 * 1024,
+            max_parts=len(inline.fields) + 3,
+            max_header_bytes=8 * 1024,
+            file_memory_bytes=0,
+        )
+        try:
+            form = await context.req.form_data(limits)
+        except (FormDataLimitError, TypeError) as form_error:
+            return problem(413, title="Admin inline form rejected", detail=str(form_error))
+
+        allowed = set(inline.fields) | {"operation", "object_id"}
+        raw: dict[str, str] = {}
+        errors: dict[str, str] = {}
+        async with form:
+            for name, value in form:
+                if name not in allowed:
+                    errors["__all__"] = "The inline form contains an unexpected field."
+                    continue
+                if name in raw:
+                    errors[name if name in inline.fields else "__all__"] = (
+                        "Submit exactly one value for each inline field."
+                    )
+                    continue
+                if isinstance(value, File):
+                    errors[name if name in inline.fields else "__all__"] = (
+                        "File uploads are not supported by inline fields."
+                    )
+                    continue
+                raw[name] = value
+
+        raw_operation = raw.get("operation")
+        object_id = raw.get("object_id") or None
+        if raw_operation == "update":
+            operation: InlineOperation = "update"
+        elif raw_operation == "delete":
+            operation = "delete"
+        else:
+            operation = "create"
+        if raw_operation not in ("create", "update", "delete"):
+            errors["__all__"] = "Choose one inline operation."
+            object_id = None
+        existing = {self._record_id(target, record): record for record in collection.items}
+        if operation in ("update", "delete") and object_id not in existing:
+            errors["__all__"] = "The inline record does not belong to this parent."
+            if object_id is None:
+                object_id = "__missing__"
+        if operation == "create" and object_id is not None:
+            errors["__all__"] = "Inline create must not include an object ID."
+            object_id = None
+        if operation == "create" and collection.total >= inline.max_items:
+            errors["__all__"] = f"At most {inline.max_items} inline records are allowed."
+
+        values: dict[str, object] = {}
+        display_values: dict[str, object] = dict(raw)
+        if operation != "delete":
+            for field_name in inline.fields:
+                admin_field = target.field_map[field_name]
+                parsed_value, parse_error = admin_field.parse(raw.get(field_name))
+                if admin_field.kind == "checkbox":
+                    display_values[field_name] = bool(parsed_value)
+                if parse_error is not None:
+                    errors[field_name] = parse_error
+                elif parsed_value is not None:
+                    values[field_name] = parsed_value
+        mutation = InlineMutation(
+            operation=operation,
+            object_id=object_id,
+            values={} if operation == "delete" else values,
+        )
+        return mutation, MappingProxyType(display_values), MappingProxyType(errors)
+
+    async def _inline_error_response(
+        self,
+        context: Context,
+        actor: Actor,
+        resource: AdminResource,
+        parent: Record,
+        target: AdminResource,
+        inline: AdminInline,
+        collection: InlineCollection,
+        mutation: InlineMutation,
+        display_values: Mapping[str, object],
+        errors: Mapping[str, str],
+    ) -> Response:
+        permissions = await self._inline_permissions(context, target, collection)
+        can_add = (
+            collection.total < inline.max_items
+            and await self._allowed(context, "resource:add", target) is not None
+        )
+        content = self._renderer.inline_editor(
+            resource,
+            parent,
+            target,
+            inline,
+            collection,
+            permissions=permissions,
+            can_add=can_add,
+            errors=errors,
+            error_object_id=mutation.object_id,
+            error_values=display_values,
+            error_operation=mutation.operation,
+        )
+        return self._renderer.response(
+            context,
+            title=inline.label,
+            actor=actor,
+            content=content,
+            status=422,
+        )
+
+    @staticmethod
+    def _safe_inline_errors(
+        target: AdminResource,
+        inline: AdminInline,
+        errors: Mapping[str, str],
+    ) -> Mapping[str, str]:
+        allowed = set(inline.fields) | {"__all__"}
+        safe = {
+            name if name in allowed else "__all__": message
+            for name, message in errors.items()
+            if message
+        }
+        return safe or {"__all__": "The inline record could not be saved."}
+
+    @classmethod
+    def _validate_inline_result(
+        cls,
+        target: AdminResource,
+        inline: AdminInline,
+        parent_object_id: str,
+        mutation: InlineMutation,
+        result: InlineMutationResult,
+    ) -> str:
+        if not isinstance(result, InlineMutationResult):
+            raise TypeError("inline mutator returned an invalid result")
+        if mutation.operation == "delete":
+            if not result.deleted or result.record is not None:
+                raise ValueError("inline delete did not confirm one deletion")
+            if mutation.object_id is None:
+                raise ValueError("inline delete result has no object ID")
+            return mutation.object_id
+        if result.deleted or result.record is None:
+            raise ValueError("inline create/update did not return a record")
+        cls._validate_record(target, result.record)
+        if str(result.record.get(inline.parent_field)) != parent_object_id:
+            raise ValueError("inline mutator returned a record for another parent")
+        result_id = cls._record_id(target, result.record)
+        if mutation.operation == "update" and result_id != mutation.object_id:
+            raise ValueError("inline update returned another object")
+        return result_id
 
     async def _delete_form(self, context: Context) -> Response:
         resource = self._resource(context)
@@ -862,6 +1629,7 @@ class AdminSite:
         self,
         context: Context,
         resource: AdminResource,
+        source_object_id: str | None,
     ) -> tuple[Mapping[str, object], Mapping[str, object], Mapping[str, str]] | Response:
         content_type = (context.req.header("content-type") or "").partition(";")[0].strip().lower()
         if content_type != "application/x-www-form-urlencoded":
@@ -907,6 +1675,27 @@ class AdminSite:
                 errors[admin_field.name] = parse_error
             elif parsed_value is not None:
                 values[admin_field.name] = parsed_value
+        for relationship in resource.relationships:
+            if relationship.field in errors:
+                continue
+            related_id = values.get(relationship.field)
+            if related_id is None:
+                display_values[relationship.display_field] = None
+                continue
+            choice = await self._resolve_relationship(
+                context,
+                resource,
+                relationship,
+                source_object_id,
+                str(related_id),
+            )
+            if choice is None:
+                values.pop(relationship.field, None)
+                errors[relationship.field] = "Select an authorized related record."
+                continue
+            values[relationship.field] = choice.id
+            display_values[relationship.field] = choice.id
+            display_values[relationship.display_field] = choice.label
         return (
             MappingProxyType(values),
             MappingProxyType(display_values),
@@ -980,7 +1769,7 @@ class AdminSite:
             )
         return action, unique_ids
 
-    def _form_error_response(
+    async def _form_error_response(
         self,
         context: Context,
         resource: AdminResource,
@@ -991,7 +1780,22 @@ class AdminSite:
         values: Mapping[str, object],
         errors: Mapping[str, str],
         submit_label: str,
+        source_object_id: str | None,
     ) -> Response:
+        relationship_values = dict(values)
+        for relationship in resource.relationships:
+            if relationship.field in errors:
+                relationship_values.pop(relationship.field, None)
+                relationship_values.pop(relationship.display_field, None)
+        relationship_state = await self._relationship_form_state(
+            context,
+            resource,
+            source_object_id,
+            relationship_values,
+        )
+        if relationship_state is None:
+            return self._forbidden()
+        values, relationship_choices = relationship_state
         content = self._renderer.form(
             resource,
             action=action,
@@ -999,6 +1803,8 @@ class AdminSite:
             values=values,
             errors=errors,
             submit_label=submit_label,
+            relationship_choices=relationship_choices,
+            source_object_id=source_object_id,
         )
         return self._renderer.response(
             context,

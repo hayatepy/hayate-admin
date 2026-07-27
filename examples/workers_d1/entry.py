@@ -36,6 +36,7 @@ task_resource = tasks.task_resource
 audit_history_reader = tasks.audit_history_reader
 
 _ORIGIN = "http://127.0.0.1:8796"
+_TENANT_KEY = "hayate_admin_example_tenant"
 _ROLE_ACTIONS: dict[str, frozenset[AdminAction]] = {
     "viewer": frozenset({"site:view", "resource:view"}),
     "operator": frozenset(
@@ -57,7 +58,14 @@ def _database(context: Context) -> D1Database:
 
 
 def repository_factory(context: Context) -> TaskRepository:
-    return TaskRepository(_database(context), task_queries)
+    tenant_key = context.get(_TENANT_KEY)
+    if not isinstance(tenant_key, str):
+        raise RuntimeError("D1 repository resolved before tenant authorization")
+    return TaskRepository(
+        _database(context),
+        task_queries,
+        tenant_key=tenant_key,
+    )
 
 
 def audit_factory(context: Context) -> AuditSink:
@@ -91,10 +99,21 @@ async def authorize(
 ) -> Actor | None:
     del resource, object_id
     authorization = context.req.header("authorization") or ""
-    scheme, separator, role = authorization.partition(" ")
-    if scheme != "Bearer" or separator != " " or action not in _ROLE_ACTIONS.get(role, ()):
+    scheme, separator, identity = authorization.partition(" ")
+    role, tenant_separator, tenant_key = identity.partition(":")
+    if not tenant_separator:
+        tenant_key = "alpha"
+    if (
+        scheme != "Bearer"
+        or separator != " "
+        or action not in _ROLE_ACTIONS.get(role, ())
+        or not tenant_key
+        or len(tenant_key) > 120
+        or any(ord(character) < 0x20 for character in tenant_key)
+    ):
         return None
-    return Actor(f"workerd-{role}", f"Workerd {role}")
+    context.set(_TENANT_KEY, tenant_key)
+    return Actor(f"workerd-{role}-{tenant_key}", f"Workerd {role} ({tenant_key})")
 
 
 app = Hayate()

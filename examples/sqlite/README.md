@@ -12,6 +12,15 @@ There is no ORM, schema reflection, generic SQL builder, or database call in
 `TaskRepository`. Search, filter, and sort choices select checked-in generated
 functions; request values are only bound parameters.
 
+The task resource also demonstrates a nullable self-relationship and reverse
+subtask inline. Relationship list/get statements preload `parent_name`, while
+the search and single-ID resolver are independently tenant-scoped. Inline
+create uses `INSERT ... SELECT` against the same-tenant parent; update/delete
+place tenant, parent, and child IDs in one checked statement.
+Relationship create/update also repeat the same-tenant parent condition in
+their write statement, backed by a composite `(tenant_key, parent_id)` foreign
+key.
+
 ## Compile the contracts
 
 From the repository root:
@@ -73,9 +82,11 @@ Rows contain time, phase, action, optional registered operation slug, resource,
 object ID, actor ID, and error type. They have no form-value, record-snapshot,
 SQL, cookie, or token column.
 
-The real-browser gate signs in through hayate-auth, creates two records,
-selects and bulk-closes one, searches, filters, sorts, edits, views redacted
-object history, deletes, checks browser errors, and verifies the audit rows:
+The real-browser gate signs in through hayate-auth, creates records, searches
+and selects an authorized parent, follows the preloaded relationship, deletes
+a child through the inline editor, bulk-closes, searches, filters, sorts,
+edits, views redacted object history, deletes, checks browser errors, and
+verifies the audit rows:
 
 ```sh
 uv run playwright install chromium
