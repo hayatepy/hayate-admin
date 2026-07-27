@@ -19,6 +19,7 @@ type AdminAction = Literal[
     "resource:change",
     "resource:delete",
     "resource:bulk",
+    "resource:history",
 ]
 type FieldKind = Literal[
     "text",
@@ -458,6 +459,46 @@ class AuditEvent:
     actor_id: str | None
     error_type: str | None = None
     operation: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AuditHistoryPage:
+    """One bounded page of already-redacted object audit events."""
+
+    items: Sequence[AuditEvent]
+    total: int
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.items, Sequence)
+            or isinstance(self.items, (str, bytes))
+            or any(not isinstance(event, AuditEvent) for event in self.items)
+        ):
+            raise ValueError("audit history items must contain AuditEvent values")
+        if not isinstance(self.total, int) or isinstance(self.total, bool) or self.total < 0:
+            raise ValueError("audit history total must be non-negative")
+        if self.total < len(self.items):
+            raise ValueError("audit history total cannot be smaller than its item count")
+        object.__setattr__(self, "items", tuple(self.items))
+
+
+class AuditHistoryReader(Protocol):
+    """Read only redacted events for one already-authorized object."""
+
+    def __call__(
+        self,
+        context: Context,
+        resource: AdminResource,
+        object_id: str,
+        offset: int,
+        limit: int,
+    ) -> Awaitable[AuditHistoryPage]: ...
+
+
+class AuditHistoryReaderFactory(Protocol):
+    """Resolve a history reader from request-local runtime bindings."""
+
+    def __call__(self, context: Context) -> AuditHistoryReader: ...
 
 
 class Authorizer(Protocol):

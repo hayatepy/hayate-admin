@@ -123,6 +123,20 @@ async def test_generated_sqlite_repository_sessions_permissions_and_redacted_aud
             body=_task_form("Updated task", status="closed"),
         )
         assert edited.status == 303
+        history = await example.app.request(
+            "/admin/tasks/object/1/history",
+            headers={"cookie": editor},
+        )
+        history_body = await history.text()
+        assert history.status == 200
+        assert "resource:bulk / close" in history_body
+        assert "form-value-must-not-reach-audit" not in history_body
+        assert "Updated task" not in history_body
+        viewer_history = await example.app.request(
+            "/admin/tasks/object/1/history",
+            headers={"cookie": viewer},
+        )
+        assert viewer_history.status == 403
         denied_delete = await example.app.request(
             "/admin/tasks/object/1/delete",
             method="POST",

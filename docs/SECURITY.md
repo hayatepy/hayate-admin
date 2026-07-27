@@ -78,6 +78,18 @@ Use `audit_factory` when the durable sink depends on a request-local platform
 binding. Exactly one static `audit` or request-scoped `audit_factory` is
 required.
 
+## Object history boundary
+
+History is disabled unless an `AuditHistoryReader` or request-scoped factory is
+configured. The route requires the separate `resource:history` permission for
+the exact object ID. Reader results are capped at 50 per page and rejected if
+any event names another resource or object.
+
+The reader contract can return only `AuditEvent` metadata. Do not reconstruct
+record snapshots or submitted form values for this UI. Actor IDs and error
+types are still operationally sensitive, so grant history access more narrowly
+than ordinary record viewing when appropriate.
+
 ## Denial-of-service controls
 
 - form body: 64 KiB;
@@ -86,6 +98,7 @@ required.
 - filter choices: 100 per field;
 - page size: 100 records;
 - selected bulk IDs: 100, or the action's lower declared limit;
+- object history: 50 events per page;
 - page number: 1–1,000,000;
 - repository result: no more than the requested page.
 

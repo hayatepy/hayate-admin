@@ -58,7 +58,8 @@ view or place the app behind an identity-aware proxy.
 Roles are deliberately not self-asserted:
 
 - `viewer` can view the site and resources;
-- `editor` can also add, change, and run the declared close bulk action;
+- `editor` can also add, change, run the declared close bulk action, and view
+  redacted object history;
 - `operator` can also delete records.
 
 The public auth API cannot write `admin_role`. Provision roles through a
@@ -73,8 +74,8 @@ object ID, actor ID, and error type. They have no form-value, record-snapshot,
 SQL, cookie, or token column.
 
 The real-browser gate signs in through hayate-auth, creates two records,
-selects and bulk-closes one, searches, filters, sorts, edits, deletes, checks
-browser errors, and verifies the audit rows:
+selects and bulk-closes one, searches, filters, sorts, edits, views redacted
+object history, deletes, checks browser errors, and verifies the audit rows:
 
 ```sh
 uv run playwright install chromium

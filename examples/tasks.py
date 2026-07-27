@@ -4,18 +4,24 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from typing import Protocol
+from datetime import datetime
+from typing import Protocol, cast
 
 from hayate import Context
 from hayate_sql import Database
 
 from hayate_admin import (
+    AdminAction,
     AdminBulkAction,
     AdminField,
     AdminRepository,
     AdminRepositoryFactory,
     AdminResource,
     AdminValidationError,
+    AuditEvent,
+    AuditHistoryPage,
+    AuditHistoryReader,
+    AuditPhase,
     BulkActionResult,
     ListQuery,
     Page,
@@ -116,6 +122,30 @@ class TaskQueryFacade(Protocol):
     ) -> Mapping[str, object] | None: ...
 
 
+class AuditQueryFacade(Protocol):
+    """Generated audit functions consumed by both SQLite and D1 history."""
+
+    async def count_admin_audit_events_for_object(
+        self,
+        db: Database,
+        /,
+        *,
+        resource: str,
+        object_id: str,
+    ) -> Mapping[str, object]: ...
+
+    async def list_admin_audit_events_for_object(
+        self,
+        db: Database,
+        /,
+        *,
+        resource: str,
+        object_id: str,
+        limit: int,
+        offset: int,
+    ) -> Sequence[Mapping[str, object]]: ...
+
+
 type ListScopeFactory = Callable[[], AbstractAsyncContextManager[object]]
 
 
@@ -153,6 +183,20 @@ def _boolean(values: Mapping[str, object], name: str) -> bool:
     value = values.get(name)
     if not isinstance(value, bool):
         raise AdminValidationError({name: "A boolean value is required."})
+    return value
+
+
+def _required_string(row: Mapping[str, object], name: str) -> str:
+    value = row.get(name)
+    if not isinstance(value, str):
+        raise ValueError(f"audit history returned an invalid {name}")
+    return value
+
+
+def _optional_string(row: Mapping[str, object], name: str) -> str | None:
+    value = row.get(name)
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"audit history returned an invalid {name}")
     return value
 
 
@@ -276,6 +320,71 @@ async def _close_selected(
     if not isinstance(repository, TaskRepository):
         raise TypeError("close action requires the task repository")
     return await repository.close(object_ids)
+
+
+def audit_history_reader(
+    database: Database,
+    queries: AuditQueryFacade,
+) -> AuditHistoryReader:
+    """Build the same checked, redacted history reader for SQLite and D1."""
+
+    async def read_history(
+        context: Context,
+        resource: AdminResource,
+        object_id: str,
+        offset: int,
+        limit: int,
+    ) -> AuditHistoryPage:
+        del context
+        total_row = await queries.count_admin_audit_events_for_object(
+            database,
+            resource=resource.slug,
+            object_id=object_id,
+        )
+        rows = await queries.list_admin_audit_events_for_object(
+            database,
+            resource=resource.slug,
+            object_id=object_id,
+            limit=limit,
+            offset=offset,
+        )
+        total = total_row.get("total")
+        if not isinstance(total, int):
+            raise ValueError("audit history returned an invalid total")
+        events = []
+        for row in rows:
+            phase = _required_string(row, "phase")
+            action = _required_string(row, "action")
+            if phase not in ("attempt", "success", "failure"):
+                raise ValueError("audit history returned an invalid phase")
+            if action not in (
+                "site:view",
+                "resource:view",
+                "resource:add",
+                "resource:change",
+                "resource:delete",
+                "resource:bulk",
+                "resource:history",
+            ):
+                raise ValueError("audit history returned an invalid action")
+            occurred_at = datetime.fromisoformat(_required_string(row, "occurred_at"))
+            if occurred_at.tzinfo is None:
+                raise ValueError("audit history timestamps must include a timezone")
+            events.append(
+                AuditEvent(
+                    occurred_at=occurred_at,
+                    phase=cast(AuditPhase, phase),
+                    action=cast(AdminAction, action),
+                    resource=_required_string(row, "resource"),
+                    object_id=_optional_string(row, "object_id"),
+                    actor_id=_optional_string(row, "actor_id"),
+                    error_type=_optional_string(row, "error_type"),
+                    operation=_optional_string(row, "operation"),
+                )
+            )
+        return AuditHistoryPage(events, total)
+
+    return read_history
 
 
 def task_resource(

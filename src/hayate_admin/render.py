@@ -16,6 +16,7 @@ from .contracts import (
     AdminBulkAction,
     AdminField,
     AdminResource,
+    AuditHistoryPage,
     BulkActionResult,
     ListQuery,
     Page,
@@ -349,6 +350,7 @@ class AdminRenderer:
         *,
         can_change: bool,
         can_delete: bool,
+        can_history: bool,
     ) -> str:
         object_id = _record_id(resource, record)
         entries = "".join(
@@ -361,9 +363,62 @@ class AdminRenderer:
             actions.append(_link("Edit", f"{base}/edit"))
         if can_delete:
             actions.append(_link("Delete", f"{base}/delete"))
+        if can_history:
+            actions.append(_link("History", f"{base}/history"))
         return (
             f"<h1>{_e(_record_title(resource, record))}</h1>"
             f"<dl>{entries}</dl><p>{' · '.join(actions)}</p>"
+        )
+
+    def history(
+        self,
+        resource: AdminResource,
+        object_id: str,
+        page: AuditHistoryPage,
+        *,
+        page_number: int,
+        limit: int,
+    ) -> str:
+        detail = _path(self.prefix, resource, "object", object_id)
+        if not page.items:
+            table = '<p role="status">No history events are available.</p>'
+        else:
+            rows = []
+            for event in page.items:
+                action: str = event.action
+                if event.operation is not None:
+                    action = f"{action} / {event.operation}"
+                result: str = event.phase
+                if event.error_type is not None:
+                    result = f"{result} ({event.error_type})"
+                timestamp = event.occurred_at.isoformat()
+                rows.append(
+                    "<tr>"
+                    f'<td><time datetime="{_e(timestamp)}">{_e(timestamp)}</time></td>'
+                    f"<td>{_e(action)}</td>"
+                    f"<td>{_display(event.actor_id)}</td>"
+                    f"<td>{_e(result)}</td>"
+                    "</tr>"
+                )
+            table = (
+                "<table><caption>Redacted audit history</caption>"
+                '<thead><tr><th scope="col">Time</th><th scope="col">Action</th>'
+                '<th scope="col">Actor</th><th scope="col">Result</th></tr></thead>'
+                f"<tbody>{''.join(rows)}</tbody></table>"
+            )
+        page_count = max(1, math.ceil(page.total / limit))
+        links = []
+        base = f"{detail}/history"
+        if page_number > 1:
+            links.append(_link("Previous", f"{base}?{urlencode({'page': page_number - 1})}"))
+        links.append(f"<span>Page {page_number} of {page_count}</span>")
+        if page_number < page_count:
+            links.append(_link("Next", f"{base}?{urlencode({'page': page_number + 1})}"))
+        pagination = f'<nav aria-label="History pagination">{" · ".join(links)}</nav>'
+        return (
+            f"<h1>History for {_e(object_id)}</h1>"
+            "<p>Events contain metadata only; submitted values are not recorded.</p>"
+            f"{table}{pagination}<p>{_link('Back to record', detail)}</p>"
         )
 
     def form(

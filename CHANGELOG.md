@@ -22,3 +22,5 @@ All notable changes to hayate-admin are documented here.
 - Add explicit bounded bulk actions with resource and per-object authorization,
   complete partial-result contracts, accessible controls, and operation-tagged
   redacted audit evidence on SQLite, Chromium, and native D1.
+- Add separately authorized, bounded object history through an explicit
+  request-local reader contract and the same generated SQLite/D1 audit queries.

@@ -41,6 +41,45 @@ async def close_task(
     )
 
 
+class CountAdminAuditEventsForObjectRow(TypedDict):
+    total: int
+
+
+COUNT_ADMIN_AUDIT_EVENTS_FOR_OBJECT_QUERY = Query(
+    name="count_admin_audit_events_for_object",
+    sql=(
+        "SELECT count(*) AS total\n"
+        "FROM admin_audit_event\n"
+        "WHERE resource = ?1\n"
+        "  AND object_id = ?2"
+    ),
+    cardinality=Cardinality.ONE,
+    parameters=(
+        Parameter("resource", "str"),
+        Parameter("object_id", "str"),
+    ),
+    columns=(Column("total", "int"),),
+    timeout_ms=None,
+)
+
+
+async def count_admin_audit_events_for_object(
+    db: Database,
+    /,
+    *,
+    resource: str,
+    object_id: str,
+) -> CountAdminAuditEventsForObjectRow:
+    return cast(
+        "CountAdminAuditEventsForObjectRow",
+        await db.run(
+            COUNT_ADMIN_AUDIT_EVENTS_FOR_OBJECT_QUERY,
+            resource=resource,
+            object_id=object_id,
+        ),
+    )
+
+
 class CountTasksRow(TypedDict):
     total: int
 
@@ -335,6 +374,70 @@ async def list_admin_audit_events(db: Database, /) -> list[ListAdminAuditEventsR
     )
 
 
+class ListAdminAuditEventsForObjectRow(TypedDict):
+    occurred_at: str
+    phase: str
+    action: str
+    operation: str | None
+    resource: str
+    object_id: str | None
+    actor_id: str | None
+    error_type: str | None
+
+
+LIST_ADMIN_AUDIT_EVENTS_FOR_OBJECT_QUERY = Query(
+    name="list_admin_audit_events_for_object",
+    sql=(
+        "SELECT occurred_at, phase, action, operation,\n"
+        "       resource, object_id, actor_id, error_type\n"
+        "FROM admin_audit_event\n"
+        "WHERE resource = ?1\n"
+        "  AND object_id = ?2\n"
+        "ORDER BY id DESC\n"
+        "LIMIT ?3 OFFSET ?4"
+    ),
+    cardinality=Cardinality.MANY,
+    parameters=(
+        Parameter("resource", "str"),
+        Parameter("object_id", "str"),
+        Parameter("limit", "int"),
+        Parameter("offset", "int"),
+    ),
+    columns=(
+        Column("occurred_at", "str"),
+        Column("phase", "str"),
+        Column("action", "str"),
+        Column("operation", "str?"),
+        Column("resource", "str"),
+        Column("object_id", "str?"),
+        Column("actor_id", "str?"),
+        Column("error_type", "str?"),
+    ),
+    timeout_ms=None,
+)
+
+
+async def list_admin_audit_events_for_object(
+    db: Database,
+    /,
+    *,
+    resource: str,
+    object_id: str,
+    limit: int,
+    offset: int,
+) -> list[ListAdminAuditEventsForObjectRow]:
+    return cast(
+        "list[ListAdminAuditEventsForObjectRow]",
+        await db.run(
+            LIST_ADMIN_AUDIT_EVENTS_FOR_OBJECT_QUERY,
+            resource=resource,
+            object_id=object_id,
+            limit=limit,
+            offset=offset,
+        ),
+    )
+
+
 class ListTasksDefaultRow(TypedDict):
     id: int
     name: str
@@ -603,12 +706,14 @@ async def upsert_admin_role(
 
 __all__ = [
     "CLOSE_TASK_QUERY",
+    "COUNT_ADMIN_AUDIT_EVENTS_FOR_OBJECT_QUERY",
     "COUNT_TASKS_QUERY",
     "CREATE_ADMIN_AUDIT_EVENT_QUERY",
     "CREATE_TASK_QUERY",
     "DELETE_TASK_QUERY",
     "GET_ADMIN_ROLE_QUERY",
     "GET_TASK_QUERY",
+    "LIST_ADMIN_AUDIT_EVENTS_FOR_OBJECT_QUERY",
     "LIST_ADMIN_AUDIT_EVENTS_QUERY",
     "LIST_TASKS_DEFAULT_QUERY",
     "LIST_TASKS_NAME_ASC_QUERY",
@@ -616,17 +721,20 @@ __all__ = [
     "UPDATE_TASK_QUERY",
     "UPSERT_ADMIN_ROLE_QUERY",
     "CloseTaskRow",
+    "CountAdminAuditEventsForObjectRow",
     "CountTasksRow",
     "CreateTaskRow",
     "DeleteTaskRow",
     "GetAdminRoleRow",
     "GetTaskRow",
+    "ListAdminAuditEventsForObjectRow",
     "ListAdminAuditEventsRow",
     "ListTasksDefaultRow",
     "ListTasksNameAscRow",
     "ListTasksNameDescRow",
     "UpdateTaskRow",
     "close_task",
+    "count_admin_audit_events_for_object",
     "count_tasks",
     "create_admin_audit_event",
     "create_task",
@@ -634,6 +742,7 @@ __all__ = [
     "get_admin_role",
     "get_task",
     "list_admin_audit_events",
+    "list_admin_audit_events_for_object",
     "list_tasks_default",
     "list_tasks_name_asc",
     "list_tasks_name_desc",

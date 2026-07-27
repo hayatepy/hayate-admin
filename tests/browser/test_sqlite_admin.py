@@ -161,6 +161,12 @@ async def test_real_browser_create_search_filter_sort_edit_delete(
         await page.get_by_role("button", name="Save changes").click()
         await expect(page.get_by_role("heading", name="Beta task")).to_be_visible()
 
+        await page.get_by_role("link", name="History").click()
+        await expect(page.get_by_role("heading", name="History for 2")).to_be_visible()
+        await expect(page.get_by_text("submitted values are not recorded")).to_be_visible()
+        await expect(page.get_by_text("Beta task")).to_have_count(0)
+        await page.get_by_role("link", name="Back to record").click()
+
         await page.get_by_role("link", name="Delete").click()
         await page.get_by_role("button", name="Confirm delete").click()
         await expect(page.get_by_role("heading", name="Tasks")).to_be_visible()

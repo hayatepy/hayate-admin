@@ -378,3 +378,17 @@ for event in events:
     }
 print("workerd D1 admin: authorization origin validation escaping CRUD bulk htmx audit")
 PY
+
+status="$(
+  curl --silent --output "${body_file}" --write-out '%{http_code}' \
+    -H 'Authorization: Bearer operator' \
+    "${origin}/admin/tasks/object/1/history"
+)"
+test "${status}" = "200"
+grep -Fq "History for 1" "${body_file}"
+grep -Fq "resource:bulk / close" "${body_file}"
+if grep -Fq "d1-bound-secret" "${body_file}"; then
+  echo "submitted value reached D1 object history" >&2
+  exit 1
+fi
+echo "workerd D1 admin history: authorized paginated redacted object events"
