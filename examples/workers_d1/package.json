@@ -1,0 +1,7 @@
+{
+  "name": "hayate-admin-workers-d1-example",
+  "private": true,
+  "devDependencies": {
+    "wrangler": "4.114.0"
+  }
+}

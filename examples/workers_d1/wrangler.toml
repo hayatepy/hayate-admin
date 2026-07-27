@@ -1,0 +1,21 @@
+name = "hayate-admin-d1-contract"
+main = "examples/workers_d1/entry.py"
+compatibility_date = "2026-07-27"
+compatibility_flags = ["python_workers"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "hayate-admin-contract"
+database_id = "local"
+migrations_dir = "examples/sqlite/migrations"
+
+[python_modules]
+exclude = [
+  "**/*.pyc",
+  "**/__pycache__/**",
+  "**/*.dist-info/**",
+  "asgi.py",
+  "hayate/adapters/asgi.py",
+  "hayate/adapters/aws.py",
+  "workers/wsgi.py",
+]

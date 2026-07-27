@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import fields
+from dataclasses import fields, replace
 from urllib.parse import urlencode
 
 import pytest
@@ -202,6 +202,16 @@ def test_site_configuration_and_registration_fail_closed():
     async def audit(event):
         pass
 
+    with pytest.raises(ValueError, match="exactly one audit"):
+        AdminSite(title="Admin", allowed_origins={ORIGIN}, authorize=authorize)
+    with pytest.raises(ValueError, match="exactly one audit"):
+        AdminSite(
+            title="Admin",
+            allowed_origins={ORIGIN},
+            authorize=authorize,
+            audit=audit,
+            audit_factory=lambda context: audit,
+        )
     with pytest.raises(ValueError, match="allowed_origins"):
         AdminSite(title="Admin", allowed_origins=set(), authorize=authorize, audit=audit)
     with pytest.raises(ValueError, match="invalid admin allowed origin"):
@@ -471,6 +481,52 @@ async def test_attempt_audit_failure_stops_mutation_before_storage():
     )
     assert response.status == 500
     assert repository.created == []
+
+
+async def test_request_scoped_repository_and_audit_factories_use_context_bindings():
+    repository = MemoryRepository()
+    binding = object()
+    repository_bindings = []
+    audit_bindings = []
+    audit_events: list[AuditEvent] = []
+
+    async def authorize(context, action, admin_resource, object_id):
+        return Actor("operator-1", "Operator")
+
+    def repository_factory(context):
+        repository_bindings.append(context.env["database"])
+        return repository
+
+    def audit_factory(context):
+        audit_bindings.append(context.env["database"])
+
+        async def audit(event):
+            audit_events.append(event)
+
+        return audit
+
+    app = Hayate(env={"database": binding})
+    site = AdminSite(
+        title="Operations",
+        allowed_origins={ORIGIN},
+        authorize=authorize,
+        audit_factory=audit_factory,
+    )
+    site.add(replace(resource(repository), repository=repository_factory))
+    site.register(app)
+
+    listed = await app.request("/admin/users")
+    assert listed.status == 200
+    created = await app.request(
+        "/admin/users/create",
+        method="POST",
+        headers=mutation_headers(),
+        body=valid_form(),
+    )
+    assert created.status == 303
+    assert repository_bindings == [binding, binding]
+    assert audit_bindings == [binding, binding]
+    assert [event.phase for event in audit_events] == ["attempt", "success"]
 
 
 async def test_form_body_limit_and_media_type_are_enforced():

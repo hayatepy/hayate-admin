@@ -3,7 +3,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import assert_type
 
-from hayate_admin import AdminRepository, ListQuery, Page
+from hayate import Context
+
+from hayate_admin import AdminRepository, AdminRepositoryFactory, ListQuery, Page
 
 
 class Repository:
@@ -29,3 +31,11 @@ class Repository:
 
 repository: AdminRepository = Repository()
 assert_type(repository, AdminRepository)
+
+
+def repository_factory(context: Context) -> AdminRepository:
+    return Repository()
+
+
+factory: AdminRepositoryFactory = repository_factory
+assert_type(factory, AdminRepositoryFactory)
