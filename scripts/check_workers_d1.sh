@@ -117,7 +117,7 @@ cp "${repo_dir}/examples/workers_d1/wrangler.toml" "${test_dir}/wrangler.toml"
 cp "${repo_dir}/examples/workers_d1/package.json" "${test_dir}/package.json"
 sed \
   -e "s|\"hayate==0.13.0\"|\"hayate @ file://${hayate_wheel}\"|" \
-  -e "s|\"hayate-admin==0.2.0\"|\"hayate-admin @ file://${admin_wheel}\"|" \
+  -e "s|\"hayate-admin==0.3.0\"|\"hayate-admin @ file://${admin_wheel}\"|" \
   -e "s|\"hayate-htmx==0.2.0\"|\"hayate-htmx @ file://${htmx_wheel}\"|" \
   -e "s|\"hayate-sql==0.1.1\"|\"hayate-sql @ file://${sql_wheel}\"|" \
   "${repo_dir}/examples/workers_d1/pyproject.toml" >"${test_dir}/pyproject.toml"

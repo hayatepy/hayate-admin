@@ -368,6 +368,12 @@ Until `hayate-htmx` completes its first PyPI publication, `uv.lock` resolves
 the reviewed 0.2.0 source commit. Published `hayate-admin` artifacts will
 depend on the normal `hayate-htmx>=0.2,<1` package range.
 
+Release tags are immutable. The existing `v0.2.0` tag contains saved views,
+keyset pagination, and bounded CSV export. After `hayate-htmx 0.2` is public,
+publish that tag unchanged, then create `v0.3.0` from reviewed main for the
+localization, branding, CSP, and accessibility additions. Never move or reuse
+either tag.
+
 ```sh
 uv sync --locked
 uv run ruff check src examples tests typing_tests

@@ -49,7 +49,7 @@ from .contracts import (
 from .messages import ENGLISH_MESSAGES, AdminMessages
 from .site import AdminSite
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "ENGLISH_MESSAGES",
