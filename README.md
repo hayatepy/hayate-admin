@@ -1,7 +1,8 @@
 # hayate-admin
 
-> **Hayate ecosystem:** [Start here](https://github.com/hayatepy/.github/blob/main/docs/START.md)
+> **Hayate ecosystem:** [Start here](https://hayatepy.dev/)
 > · [Hayate](https://github.com/hayatepy/hayate)
+> · [Tested compatibility](https://hayatepy.dev/evidence/compatibility/)
 > · [Roadmap epic](https://github.com/hayatepy/roadmap/issues/12)
 
 Secure operational administration for Hayate, using explicit resources and
