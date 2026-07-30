@@ -27,6 +27,7 @@ dependencies = [
 ]
 
 [project.urls]
+Homepage = "https://hayatepy.dev/ecosystem/#hayate-admin"
 Repository = "https://github.com/hayatepy/hayate-admin"
 Documentation = "https://github.com/hayatepy/hayate-admin#readme"
 Changelog = "https://github.com/hayatepy/hayate-admin/blob/main/CHANGELOG.md"
