@@ -373,7 +373,7 @@ Release tags are immutable. The existing `v0.2.0` tag contains saved views,
 keyset pagination, and bounded CSV export. After `hayate-htmx 0.2` is public,
 publish that tag unchanged, then create `v0.3.0` from reviewed main for the
 localization, branding, CSP, and accessibility additions. Never move or reuse
-either tag.
+either tag. Follow the complete [release checklist](docs/RELEASING.md).
 
 ```sh
 uv sync --locked
