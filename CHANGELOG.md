@@ -4,11 +4,6 @@ All notable changes to hayate-admin are documented here.
 
 ## [Unreleased]
 
-### Changed
-
-- Route package discovery, start, and tested-compatibility links through
-  `hayatepy.dev`, including the future PyPI project homepage.
-
 ## [0.3.0] - 2026-07-30
 
 ### Added
@@ -22,6 +17,11 @@ All notable changes to hayate-admin are documented here.
 - Add semantic landmarks, skip navigation, visible keyboard focus,
   reduced-motion handling, and a pinned axe-core Chromium gate across real
   CRUD, bulk, history, relationship, inline, saved-view, and delete flows.
+
+### Changed
+
+- Route package discovery, start, and tested-compatibility links through
+  `hayatepy.dev`, including the PyPI project homepage.
 
 ## [0.2.0] - 2026-07-28
 
