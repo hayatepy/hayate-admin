@@ -232,11 +232,11 @@ dependencies = [
 
 [[package]]
 name = "hayate-sql"
-version = "0.1.1"
+version = "0.1.2"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/0b/c7/99c6664bc306b4d64e46944fe0112923c3d0b6d0dd89117f4fcc78163835/hayate_sql-0.1.1.tar.gz", hash = "sha256:bbc960905e424b8335f73bcfd8d11fb1c648b697ba7829ae300d78f9693a6e40", size = 14558, upload-time = "2026-07-26T14:00:54.988Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/26/df/f6bf75d1881889d8cd87048ce97e4acf698ba73335ba38642c57de0e2a78/hayate_sql-0.1.2.tar.gz", hash = "sha256:f6891901d257f5419ccb99d5c5a21740a8f4f7814ca48009e47fea420ac480c8", size = 14728, upload-time = "2026-07-30T01:52:37.354Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/72/bc/2eaca57353b1cbe6ca57a7b11e1ac3366be69e0207116dc7da17ee04a004/hayate_sql-0.1.1-py3-none-any.whl", hash = "sha256:56e82e580edd43d7881fb245583cc979e06e7b1c1c533cb878416b5fe39a4655", size = 20361, upload-time = "2026-07-26T14:00:53.744Z" },
+    { url = "https://files.pythonhosted.org/packages/cf/78/e747ca2faed9493cef8723223075b8353eb619751763010bfcc3941fef68/hayate_sql-0.1.2-py3-none-any.whl", hash = "sha256:02ff10996779ade9889e373691382d2e9049b56c323c7a80914cffb929006522", size = 20365, upload-time = "2026-07-30T01:52:36.062Z" },
 ]
 
 [[package]]
