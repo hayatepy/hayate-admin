@@ -197,15 +197,15 @@ dev = [
 
 [[package]]
 name = "hayate-auth"
-version = "0.10.1"
+version = "0.10.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "hayate" },
     { name = "hayate-fetch" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1e/db/d08c99bbc2a269bb6f58fc96142dc7b28fecedd8974535c68250cdd71e08/hayate_auth-0.10.1.tar.gz", hash = "sha256:9d44c49ccc350104f0fba5171325748a249a3a9cf02d99dc9b47666fcaa180bb", size = 58439, upload-time = "2026-07-27T13:27:52.864Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3e/ba/d79b586176d19fb2b10dc07a422665b71f2a99fed2dba270218d2c26d687/hayate_auth-0.10.5.tar.gz", hash = "sha256:da3842d8c7563a841f216df22432e5eb6e83b9013a624dc07f1e94f013c788d4", size = 58787, upload-time = "2026-07-30T01:53:14.346Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/92/ab/a95c4892923dbcada0a1a73ff00ae08f509d55d94d89184c2000ebd7b828/hayate_auth-0.10.1-py3-none-any.whl", hash = "sha256:1a32d8e0a41b53b56bc8eec1c9a540c2382410921cc3bf4e081dd6ca90317531", size = 74826, upload-time = "2026-07-27T13:27:51.578Z" },
+    { url = "https://files.pythonhosted.org/packages/43/d4/9a31ba9e3567d52e2541c9660c022fa2fe06d97a7a72adfa3f338d15d7ad/hayate_auth-0.10.5-py3-none-any.whl", hash = "sha256:84e872117d353723166f5cb9c5d6a6e56954f0a94998a145f9a42ae66ab1b3e0", size = 74958, upload-time = "2026-07-30T01:53:12.971Z" },
 ]
 
 [[package]]
